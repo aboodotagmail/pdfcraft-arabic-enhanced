@@ -1462,9 +1462,11 @@ impl Automation {
         let p = Path::new(path);
         let Some(root) = &self.root else { return Ok(p.to_path_buf()) };
         let outside = || failed(format!("{path} is outside the allowed directory {}", root.display()));
-        // What would leave the root on Windows is refused everywhere, so a script behaves the
-        // same on every system (elsewhere `\\` is an ordinary character in a file name).
-        if windows_escape(path, root) {
+        // What would leave the root on Windows is refused elsewhere too, so a script behaves the
+        // same on every system (there `\\` is an ordinary character in a file name). On Windows
+        // the checks below already read drives, shares and `\\` themselves, and an absolute path
+        // inside the root (`C:\\...\\root\\x.pdf`) must keep working.
+        if cfg!(not(windows)) && windows_escape(path, root) {
             return Err(outside());
         }
         let joined = lexical(&root.join(p)).ok_or_else(outside)?;
