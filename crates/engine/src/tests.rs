@@ -2186,6 +2186,25 @@ fn office_export_writes_letters_and_counts_unreadable_characters() {
     assert!(texts.iter().all(|t| !t.chars().any(|c| ('\u{FE70}'..='\u{FEFF}').contains(&c))), "{texts:?}");
 }
 
+/// The font a PDF names (subset tag and all) is the font the Word file asks for, so Word uses the
+/// reader's own installed copy; nothing of the font goes into the file.
+#[test]
+fn office_export_names_the_pdf_font_family() {
+    let pdf = composite_text_pdf("3 beginbfchar <0001> <0633> <0002> <0644> <0003> <0645> endbfchar", "BT /F1 20 Tf 300 700 Td <000300020001> Tj ET");
+    let mut s = Session::new();
+    let id = s.open("p.pdf", None, std::sync::Arc::new(pdf), None).unwrap();
+    let d = s.get(id).unwrap();
+    assert_eq!(d.export_pages()[0].blocks[0].font.as_deref(), Some("Sakkal Majalla"));
+    let docx = d.export_office_report(compare::OfficeFormat::Docx).bytes;
+    let xml = docx_part(&docx, "word/document.xml");
+    assert!(xml.contains("<w:rFonts w:ascii=\"Sakkal Majalla\" w:hAnsi=\"Sakkal Majalla\" w:cs=\"Sakkal Majalla\"/>"), "{xml}");
+    assert!(docx_part(&docx, "word/fontTable.xml").contains("<w:font w:name=\"Sakkal Majalla\"/>"));
+    // Names only: the package holds no font program.
+    for part in ["word/fonts/", ".ttf", ".odttf", "embedRegular"] {
+        assert!(!docx.windows(part.len()).any(|w| w == part.as_bytes()), "{part}");
+    }
+}
+
 /// A synthetic word-processor style page: an Arabic heading, then a right-to-left table with
 /// borders (horizontal rules as thin filled boxes, vertical ones stroked). On the page, columns
 /// right to left are 380–500, 260–380 and 100–260; the header's second cell spans the two left

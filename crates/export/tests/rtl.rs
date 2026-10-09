@@ -75,7 +75,7 @@ fn arabic_exports_right_to_left_in_every_format() {
     // The mixed line: an Arabic run (with its trailing space) marked right to left, then the
     // number and the Latin as a left-to-right run, in logical order.
     assert!(
-        xml.contains("<w:szCs w:val=\"22\"/><w:rtl/></w:rPr><w:t xml:space=\"preserve\">رقم الفاتورة </w:t></w:r><w:r><w:rPr><w:sz w:val=\"22\"/></w:rPr><w:t xml:space=\"preserve\">123 ABC</w:t>"),
+        xml.contains("<w:szCs w:val=\"22\"/><w:rtl/><w:lang w:bidi=\"ar-SA\"/></w:rPr><w:t xml:space=\"preserve\">رقم الفاتورة </w:t></w:r><w:r><w:rPr><w:sz w:val=\"22\"/></w:rPr><w:t xml:space=\"preserve\">123 ABC</w:t>"),
         "{xml}"
     );
     assert!(xml.contains("<w:tblPr><w:bidiVisual/>"), "{xml}");

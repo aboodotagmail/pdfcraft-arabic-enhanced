@@ -7,9 +7,11 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod family;
 mod grid;
 mod zip;
 
+pub use family::font_family;
 pub use zip::Zip;
 
 /// A paragraph of a page (or, in [`Page::fragments`], one piece of a line).
@@ -640,11 +642,15 @@ table{{border-collapse:collapse;margin:1em 0}}td,th{{border:1px solid #999;paddi
 
 /// A formatted text run (shared by paragraphs and table cells).
 /// Text with right-to-left letters is split into runs by direction; the right-to-left ones are
-/// marked `w:rtl` and carry the complex-script bold, italic and size Word uses for them.
-fn run_xml(text: &str, size: f64, bold: bool, italic: bool) -> String {
+/// marked `w:rtl` and carry the complex-script bold, italic and size Word uses for them, and
+/// their language (Arabic or Hebrew, for digits and proofing). `font` names the family for every
+/// script (Word picks the complex-script font for right-to-left text); without one the
+/// document's defaults apply.
+fn run_xml(text: &str, size: f64, bold: bool, italic: bool, font: Option<&str>) -> String {
     let half_points = if size.is_finite() { (size * 2.0).round().clamp(2.0, 3276.0) as i64 } else { 24 };
+    let fonts = font.map(|f| format!("<w:rFonts w:ascii=\"{0}\" w:hAnsi=\"{0}\" w:cs=\"{0}\"/>", esc(f))).unwrap_or_default();
     let one = |text: &str, rtl: bool| {
-        let mut rpr = String::new();
+        let mut rpr = fonts.clone();
         if bold {
             rpr.push_str(if rtl { "<w:b/><w:bCs/>" } else { "<w:b/>" });
         }
@@ -654,6 +660,8 @@ fn run_xml(text: &str, size: f64, bold: bool, italic: bool) -> String {
         rpr.push_str(&format!("<w:sz w:val=\"{half_points}\"/>"));
         if rtl {
             rpr.push_str(&format!("<w:szCs w:val=\"{half_points}\"/><w:rtl/>"));
+            let hebrew = text.chars().find(|c| rtl_char(*c)).is_some_and(|c| matches!(c, '\u{0590}'..='\u{05FF}' | '\u{FB1D}'..='\u{FB4F}'));
+            rpr.push_str(if hebrew { "<w:lang w:bidi=\"he-IL\"/>" } else { "<w:lang w:bidi=\"ar-SA\"/>" });
         }
         format!("<w:r><w:rPr>{rpr}</w:rPr><w:t xml:space=\"preserve\">{}</w:t></w:r>", esc(text))
     };
@@ -719,7 +727,7 @@ fn docx_table(t: &Table, max_width: i64) -> String {
             let paras: String = if c.text.is_empty() {
                 format!("<w:p>{ppr}</w:p>")
             } else {
-                c.text.split('\n').map(|line| format!("<w:p>{ppr}{}</w:p>", run_xml(line, c.size, c.bold, c.italic))).collect()
+                c.text.split('\n').map(|line| format!("<w:p>{ppr}{}</w:p>", run_xml(line, c.size, c.bold, c.italic, c.font.as_deref()))).collect()
             };
             s.push_str(&format!("<w:tc><w:tcPr><w:tcW w:w=\"{w}\" w:type=\"dxa\"/>{span}{vmerge}</w:tcPr>{paras}</w:tc>"));
         }
@@ -733,6 +741,9 @@ fn docx_table(t: &Table, max_width: i64) -> String {
     s.push_str("</w:tbl>");
     s
 }
+
+/// Font names listed in a Word file's font table.
+const MAX_FONTS: usize = 256;
 
 /// A Word section's page: size and margins in twips.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -779,6 +790,28 @@ impl Section {
         }
     }
 
+    /// How paragraph `b` sits between this page's margins, when that isn't its direction's
+    /// start: centred, or (several lines filling the width) justified. Word aligns a paragraph to
+    /// the start of its direction (right for `w:bidi`) by itself.
+    fn alignment(&self, b: &Block) -> Option<&'static str> {
+        let (left, right) = (self.left as f64 / 20.0, (self.w - self.right) as f64 / 20.0);
+        let (x0, x1) = (b.rect[0], b.rect[2]);
+        let width = right - left;
+        if ![x0, x1, width].iter().all(|v| v.is_finite()) || width <= 0.0 || x1 <= x0 {
+            return None;
+        }
+        let size = if b.size.is_finite() { b.size.max(1.0) } else { 11.0 };
+        let lines = (b.rect[3] - b.rect[1]) / (size * 1.1);
+        let (gap_left, gap_right) = (x0 - left, right - x1);
+        if lines >= 1.8 && x1 - x0 >= 0.95 * width {
+            return Some("both");
+        }
+        if x1 - x0 < 0.8 * width && gap_left > 0.05 * width && (gap_left - gap_right).abs() <= 0.04 * width.max(1.0) {
+            return Some("center");
+        }
+        None
+    }
+
     /// The text width, in twips.
     fn text_width(&self) -> i64 {
         (self.w - self.left - self.right).max(144)
@@ -811,7 +844,7 @@ pub fn docx(pages: &[Page], title: &str) -> Vec<u8> {
     let mut media: Vec<(String, &Image)> = Vec::new();
     // Word needs a paragraph between adjacent tables and after the last one in the body.
     let mut after_table = false;
-    let run = |b: &Block| run_xml(&b.text, b.size, b.bold, b.italic);
+    let run = |b: &Block| run_xml(&b.text, b.size, b.bold, b.italic, b.font.as_deref());
     for it in items(pages) {
         match &it {
             Item::Para(b, lvl, gap) => {
@@ -829,6 +862,9 @@ pub fn docx(pages: &[Page], title: &str) -> Vec<u8> {
                     let size = if b.size.is_finite() { b.size.clamp(1.0, 200.0) } else { 11.0 };
                     let before = ((gap - 0.2 * size).clamp(0.0, 72.0) * 20.0).round() as i64;
                     ppr.push_str(&format!("<w:spacing w:before=\"{before}\" w:after=\"0\"/>"));
+                }
+                if let Some(jc) = current.alignment(b) {
+                    ppr.push_str(&format!("<w:jc w:val=\"{jc}\"/>"));
                 }
                 let ppr = if ppr.is_empty() { ppr } else { format!("<w:pPr>{ppr}</w:pPr>") };
                 body.push_str(&format!("<w:p>{ppr}{}</w:p>", run(b)));
@@ -881,6 +917,7 @@ xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawin
 <Default Extension=\"png\" ContentType=\"image/png\"/><Default Extension=\"jpg\" ContentType=\"image/jpeg\"/>\
 <Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>\
 <Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>\
+<Override PartName=\"/word/fontTable.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml\"/>\
 <Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/>",
     );
     types.push_str("</Types>");
@@ -889,7 +926,8 @@ xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawin
 <Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\" Target=\"docProps/core.xml\"/></Relationships>";
     let mut doc_rels = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
-<Relationship Id=\"rIdStyles\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>",
+<Relationship Id=\"rIdStyles\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>\
+<Relationship Id=\"rIdFonts\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable\" Target=\"fontTable.xml\"/>",
     );
     for (i, (name, _)) in media.iter().enumerate() {
         doc_rels.push_str(&format!(
@@ -899,10 +937,27 @@ xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawin
     }
     doc_rels.push_str("</Relationships>");
     let styles = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii=\"Arial\" w:hAnsi=\"Arial\" w:cs=\"Times New Roman\"/></w:rPr></w:rPrDefault></w:docDefaults>\
 <w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/><w:pPr><w:spacing w:after=\"120\"/></w:pPr></w:style>\
 <w:style w:type=\"paragraph\" w:styleId=\"Heading1\"><w:name w:val=\"heading 1\"/><w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:pPr><w:keepNext/><w:spacing w:before=\"240\"/><w:outlineLvl w:val=\"0\"/></w:pPr><w:rPr><w:b/></w:rPr></w:style>\
 <w:style w:type=\"paragraph\" w:styleId=\"Heading2\"><w:name w:val=\"heading 2\"/><w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:pPr><w:keepNext/><w:spacing w:before=\"200\"/><w:outlineLvl w:val=\"1\"/></w:pPr><w:rPr><w:b/></w:rPr></w:style>\
 </w:styles>";
+    // The fonts the document asks for, by name only (nothing of a font is embedded).
+    let mut families: std::collections::BTreeSet<&str> = ["Arial", "Times New Roman"].into_iter().collect();
+    for b in pages.iter().flat_map(|p| p.blocks.iter().chain(&p.fragments)) {
+        if let Some(f) = b.font.as_deref()
+            && families.len() < MAX_FONTS
+        {
+            families.insert(f);
+        }
+    }
+    let mut font_table = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<w:fonts xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">",
+    );
+    for f in &families {
+        font_table.push_str(&format!("<w:font w:name=\"{}\"/>", esc(f)));
+    }
+    font_table.push_str("</w:fonts>");
     let core = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:title>{}</dc:title></cp:coreProperties>",
         esc(title)
@@ -913,6 +968,7 @@ xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawin
     z.add("docProps/core.xml", core.as_bytes(), true);
     z.add("word/document.xml", doc.as_bytes(), true);
     z.add("word/styles.xml", styles.as_bytes(), true);
+    z.add("word/fontTable.xml", font_table.as_bytes(), true);
     z.add("word/_rels/document.xml.rels", doc_rels.as_bytes(), true);
     for (name, im) in &media {
         z.add(&format!("word/media/{name}"), &im.bytes, false);
@@ -1172,6 +1228,52 @@ mod tests {
         let odd = Page { width: f64::NAN, height: -5.0, blocks: vec![block("x", [f64::INFINITY, 0.0, 1.0, f64::NAN])], ..Default::default() };
         let xml = part(&docx(&[odd], "Odd"), "word/document.xml");
         assert!(xml.contains("<w:pgSz w:w=\"12240\" w:h=\"144\" w:orient=\"landscape\"/>"), "{xml}");
+    }
+
+    /// Runs name their font family for every script, right-to-left runs say their language, the
+    /// font table lists the names with the fallbacks, and paragraphs keep a centred or justified
+    /// placement (start-aligned ones are left to their direction).
+    #[test]
+    fn word_runs_name_fonts_languages_and_alignment() {
+        let block = |text: &str, rect: [f64; 4], font: Option<&str>| Block {
+            text: text.into(),
+            rect,
+            size: 12.0,
+            rtl: has_rtl(text),
+            font: font.map(str::to_string),
+            ..Block::default()
+        };
+        let p = Page {
+            width: 612.0,
+            height: 792.0,
+            blocks: vec![
+                // Centred on the 72–540 text area.
+                block("تقرير", [276.0, 700.0, 336.0, 714.0], Some("Sakkal Majalla")),
+                // Right-aligned (the start of right-to-left text): no jc.
+                block("שלום עולם", [400.0, 650.0, 540.0, 664.0], None),
+                // Three lines filling the width: justified.
+                block("نص طويل يملأ السطر كله", [72.0, 560.0, 540.0, 600.0], Some("Sakkal Majalla")),
+            ],
+            ..Default::default()
+        };
+        let d = docx(&[p], "Fonts");
+        let xml = part(&d, "word/document.xml");
+        assert!(
+            xml.contains("<w:r><w:rPr><w:rFonts w:ascii=\"Sakkal Majalla\" w:hAnsi=\"Sakkal Majalla\" w:cs=\"Sakkal Majalla\"/><w:sz w:val=\"24\"/><w:szCs w:val=\"24\"/><w:rtl/><w:lang w:bidi=\"ar-SA\"/></w:rPr><w:t xml:space=\"preserve\">تقرير"),
+            "{xml}"
+        );
+        assert!(xml.contains("<w:lang w:bidi=\"he-IL\"/>"), "{xml}");
+        assert_eq!(xml.matches("<w:jc w:val=\"center\"/>").count(), 1, "{xml}");
+        assert_eq!(xml.matches("<w:jc w:val=\"both\"/>").count(), 1, "{xml}");
+        assert_eq!(xml.matches("<w:jc ").count(), 2, "{xml}");
+        let fonts = part(&d, "word/fontTable.xml");
+        assert!(fonts.contains("<w:font w:name=\"Arial\"/><w:font w:name=\"Sakkal Majalla\"/><w:font w:name=\"Times New Roman\"/>"), "{fonts}");
+        assert!(part(&d, "word/styles.xml").contains("<w:rFonts w:ascii=\"Arial\" w:hAnsi=\"Arial\" w:cs=\"Times New Roman\"/>"));
+        assert!(part(&d, "word/_rels/document.xml.rels").contains("Target=\"fontTable.xml\""));
+        assert!(part(&d, "[Content_Types].xml").contains("/word/fontTable.xml"));
+        // A name that would break the XML is escaped.
+        let odd = Page { blocks: vec![block("x", [72.0, 700.0, 80.0, 712.0], Some("A&B\"<"))], ..Default::default() };
+        assert!(part(&docx(&[odd], "Odd"), "word/fontTable.xml").contains("A&amp;B&quot;&lt;"));
     }
 
     #[test]

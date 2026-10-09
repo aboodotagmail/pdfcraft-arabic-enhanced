@@ -164,7 +164,7 @@ fn export_block(b: pdfcraft_edit::TextBlock) -> Option<pdfcraft_export::Block> {
         bold: f.contains("bold") || f.contains("black") || f.contains("heavy"),
         italic: f.contains("italic") || f.contains("oblique"),
         rtl: b.rtl,
-        font: None,
+        font: pdfcraft_export::font_family(&b.base_font),
     })
 }
 
