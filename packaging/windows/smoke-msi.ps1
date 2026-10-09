@@ -56,10 +56,11 @@ foreach ($f in $Exe, $Cli, (Join-Path $Dir 'licenses\LICENSE-MIT.txt'), (Join-Pa
     (Join-Path $Dir 'licenses\NOTICE.txt'), (Join-Path $Dir 'licenses\FONT-LICENSES.txt')) {
   if (-not (Test-Path -LiteralPath $f)) { throw "installer did not create $f" }
 }
-foreach ($exe in $Exe, $Cli) {
-  $bytes = [System.IO.File]::ReadAllBytes($exe)
+# (PowerShell variable names ignore case: the loop variable must not be called $exe.)
+foreach ($bin in $Exe, $Cli) {
+  $bytes = [System.IO.File]::ReadAllBytes($bin)
   $machine = [BitConverter]::ToUInt16($bytes, [BitConverter]::ToInt32($bytes, 0x3C) + 4)
-  if ($machine -ne 0x8664) { throw "$exe is for machine 0x$('{0:X}' -f $machine), not x64" }
+  if ($machine -ne 0x8664) { throw "$bin is for machine 0x$('{0:X}' -f $machine), not x64" }
 }
 if (-not (Select-String -Path (Join-Path $Dir 'licenses\NOTICE.txt') -SimpleMatch 'modified version of PdfCraft')) {
   throw 'installed NOTICE does not say this is a modified version'
@@ -104,6 +105,19 @@ foreach ($f in 'page.png', 'out.pdf') {
   if (-not (Test-Path $p) -or (Get-Item $p).Length -eq 0) { Write-Output $out; throw "$f was not written" }
 }
 Write-Output 'ok installed pdfcraft-cli: opened, read, edited, rendered and saved a PDF'
+
+# 3b. Arabic: added as shaped text in an embedded font, saved, reopened, extracted and found.
+$arabic = '[{"tool":"doc_open","args":{"path":"hello.pdf"}},{"tool":"page_add_text","args":{"doc":1,"page":1,"text":"مرحبا بالعالم","at":[20,40],"width":260,"size":16}},{"tool":"doc_save","args":{"doc":1,"path":"arabic.pdf"}},{"tool":"doc_open","args":{"path":"arabic.pdf"}},{"tool":"text_extract","args":{"doc":2}},{"tool":"text_find","args":{"doc":2,"query":"مرحبا"}},{"tool":"page_render","args":{"doc":2,"page":1,"dpi":96},"out":"arabic.png"}]'
+[System.IO.File]::WriteAllText((Join-Path $Smoke 'arabic.json'), $arabic, [System.Text.UTF8Encoding]::new($false))
+$out = & $Cli run --script (Join-Path $Smoke 'arabic.json') --root $Smoke 2>&1 | Out-String
+Set-Content -LiteralPath (Join-Path $Smoke 'cli-arabic.txt') -Value $out -Encoding utf8
+if ($LASTEXITCODE -ne 0) { Write-Output $out; throw "pdfcraft-cli run (Arabic) exited $LASTEXITCODE" }
+if ($out -notmatch 'مرحبا' -or $out -notmatch 'بالعالم') { Write-Output $out; throw 'the Arabic text was not extracted back' }
+if ($out -notmatch '"count":\s*1') { Write-Output $out; throw 'text_find did not find the Arabic word' }
+$saved = [System.IO.File]::ReadAllBytes((Join-Path $Smoke 'arabic.pdf'))
+$latin1 = [System.Text.Encoding]::Latin1.GetString($saved)
+if ($latin1 -notmatch '/CIDFontType2' -or $latin1 -notmatch '/FontFile2' -or $latin1 -notmatch '/ToUnicode') { throw 'the Arabic text is not in an embedded CID TrueType font with ToUnicode' }
+Write-Output 'ok installed pdfcraft-cli: Arabic added, embedded, saved, extracted and found'
 
 # 4. The installed app starts and draws its window (answers a screenshot over the control channel).
 $control = Join-Path $Smoke 'control.json'
