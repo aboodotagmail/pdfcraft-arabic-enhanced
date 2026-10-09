@@ -1462,6 +1462,11 @@ impl Automation {
         let p = Path::new(path);
         let Some(root) = &self.root else { return Ok(p.to_path_buf()) };
         let outside = || failed(format!("{path} is outside the allowed directory {}", root.display()));
+        // What would leave the root on Windows is refused everywhere, so a script behaves the
+        // same on every system (elsewhere `\\` is an ordinary character in a file name).
+        if windows_escape(path, root) {
+            return Err(outside());
+        }
         let joined = lexical(&root.join(p)).ok_or_else(outside)?;
         if foreign_share(&joined, root) {
             return Err(outside());
@@ -1495,6 +1500,20 @@ impl Automation {
         real.extend(rest.iter().rev());
         Ok(real)
     }
+}
+
+/// Whether `path`, read as a Windows path, leaves `root`: a drive (`C:`), a share or device
+/// (`\\\\server`), a root-relative path (`\\x`), or, with `\\` taken as a separator, a path that
+/// lands outside `root` by name (as `/` paths are judged).
+fn windows_escape(path: &str, root: &Path) -> bool {
+    let b = path.as_bytes();
+    if b.first().is_some_and(|c| *c == b'\\') || (b.len() >= 2 && b.first().is_some_and(u8::is_ascii_alphabetic) && b.get(1) == Some(&b':')) {
+        return true;
+    }
+    if !path.contains('\\') {
+        return false;
+    }
+    lexical(&root.join(path.replace('\\', "/"))).is_none_or(|p| !p.starts_with(root))
 }
 
 /// `path` with `.` and `..` resolved by name, before the filesystem is consulted (Windows does
@@ -1841,6 +1860,18 @@ fn write_atomic_with(path: &Path, bytes: &[u8], suffixes: impl IntoIterator<Item
 mod tests {
     use super::*;
     use pdfcraft_platform::staging::STAGING_ATTEMPTS;
+
+    #[test]
+    fn windows_escapes_are_recognised_on_every_system() {
+        let root = lexical(&std::env::temp_dir().join("pdfcraft-root")).unwrap();
+        for p in [r"C:\Windows\x", "c:x.pdf", r"\\server\share\x.pdf", r"\x.pdf", r"..\..\x.pdf", r"a\..\..\x", r"..\x.pdf"] {
+            assert!(windows_escape(p, &root), "{p}");
+        }
+        // Inside the root (by name, as `/` paths are judged), or no backslash at all.
+        for p in ["x.pdf", r"a\b.pdf", r"sub\..\x.pdf", r"..\pdfcraft-root\x.pdf", "./x.pdf", "مستند.pdf", "1:2.pdf", "../x.pdf"] {
+            assert!(!windows_escape(p, &root), "{p}");
+        }
+    }
 
     #[test]
     fn dot_dot_resolves_by_name_and_never_climbs_above_the_start() {
