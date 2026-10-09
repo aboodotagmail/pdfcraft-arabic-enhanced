@@ -175,11 +175,14 @@ fn has_rtl(text: &str) -> bool {
 
 /// What goes into the output, in order.
 enum Item<'a> {
-    Para(&'a Block, u8),
+    /// A paragraph, its heading level (0: body text) and the space above it on the page
+    /// (points, from the item above; 0 at the top of a page).
+    Para(&'a Block, u8, f64),
     /// Owned: tables are detected per page inside [`items`], so they cannot borrow.
     Table(Table),
     Img(&'a Image),
-    PageBreak,
+    /// The end of page `n` (0-based) and the start of the next.
+    PageBreak(usize),
 }
 
 /// The body text size: the size most of the document's characters are set in.
@@ -483,21 +486,30 @@ fn items(pages: &[Page]) -> Vec<Item<'_>> {
     let mut out = Vec::new();
     for (i, p) in pages.iter().enumerate() {
         if i > 0 {
-            out.push(Item::PageBreak);
+            out.push(Item::PageBreak(i - 1));
         }
         let (tables, consumed) = page_tables(p);
         // Blocks and images by their top edge, top to bottom.
-        let mut parts: Vec<(f64, f64, Item)> = p
+        let mut parts: Vec<([f64; 4], Item)> = p
             .blocks
             .iter()
             .enumerate()
             .filter(|(bi, _)| !consumed.get(*bi).copied().unwrap_or(false))
-            .map(|(_, b)| (b.rect[3], b.rect[0], Item::Para(b, level(b, body))))
+            .map(|(_, b)| (b.rect, Item::Para(b, level(b, body), 0.0)))
             .collect();
-        parts.extend(tables.into_iter().map(|t| (t.rect[3], t.rect[0], Item::Table(t))));
-        parts.extend(p.images.iter().map(|im| (im.rect[3], im.rect[0], Item::Img(im))));
-        parts.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.total_cmp(&b.1)));
-        out.extend(parts.into_iter().map(|x| x.2));
+        parts.extend(tables.into_iter().map(|t| (t.rect, Item::Table(t))));
+        parts.extend(p.images.iter().map(|im| (im.rect, Item::Img(im))));
+        parts.sort_by(|a, b| b.0[3].total_cmp(&a.0[3]).then(a.0[0].total_cmp(&b.0[0])));
+        // The gap above each paragraph: from the bottom of the item above it.
+        let mut above: Option<f64> = None;
+        for (rect, mut item) in parts {
+            if let (Item::Para(_, _, gap), Some(bottom)) = (&mut item, above) {
+                let g = bottom - rect[3];
+                *gap = if g.is_finite() { g.max(0.0) } else { 0.0 };
+            }
+            above = Some(above.map_or(rect[1], |a| a.min(rect[1])));
+            out.push(item);
+        }
     }
     out
 }
@@ -547,7 +559,7 @@ table{{border-collapse:collapse;margin:1em 0}}td,th{{border:1px solid #999;paddi
     );
     for it in items(pages) {
         match it {
-            Item::Para(b, lvl) => {
+            Item::Para(b, lvl, _) => {
                 let mut t = esc(&b.text);
                 if b.italic {
                     t = format!("<em>{t}</em>");
@@ -619,7 +631,7 @@ table{{border-collapse:collapse;margin:1em 0}}td,th{{border:1px solid #999;paddi
                 let mime = if im.ext == "jpg" { "image/jpeg" } else { "image/png" };
                 s.push_str(&format!("<p><img alt=\"\" src=\"data:{mime};base64,{}\"></p>\n", base64(&im.bytes)));
             }
-            Item::PageBreak => s.push_str("<hr>\n"),
+            Item::PageBreak(_) => s.push_str("<hr>\n"),
         }
     }
     s.push_str("</body>\n</html>\n");
@@ -722,16 +734,79 @@ fn docx_table(t: &Table, max_width: i64) -> String {
     s
 }
 
+/// A Word section's page: size and margins in twips.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Section {
+    w: i64,
+    h: i64,
+    top: i64,
+    right: i64,
+    bottom: i64,
+    left: i64,
+}
+
+impl Section {
+    /// Page `p`'s size, within what Word accepts (0.1 to 22 in; a long receipt is taller). Each
+    /// margin is the PDF's own (the room its content leaves on that side), at most 1 in (less on
+    /// small pages, so text keeps room) and at least 1/4 in: text never gets narrower than the
+    /// PDF's, which would wrap more lines and push content onto extra pages.
+    fn of(p: &Page) -> Section {
+        let twips = |pt: f64| if pt.is_finite() { (pt * 20.0).round().clamp(144.0, 31680.0) as i64 } else { 12240 };
+        let (w, h) = (twips(p.width), twips(p.height));
+        let (dx, dy) = ((w / 8).min(1440), (h / 8).min(1440));
+        // The content's box, clipped to the page (content off the page says nothing).
+        let (pw, ph) = (if p.width.is_finite() { p.width } else { 0.0 }, if p.height.is_finite() { p.height } else { 0.0 });
+        let rects = p.blocks.iter().map(|b| b.rect).chain(p.images.iter().map(|i| i.rect)).chain(p.rules.iter().copied());
+        let mut bbox: Option<[f64; 4]> = None;
+        for r in rects {
+            let c = [r[0].max(0.0), r[1].max(0.0), r[2].min(pw), r[3].min(ph)];
+            if !c.iter().all(|v| v.is_finite()) || c[2] < c[0] || c[3] < c[1] {
+                continue;
+            }
+            bbox = Some(bbox.map_or(c, |b| [b[0].min(c[0]), b[1].min(c[1]), b[2].max(c[2]), b[3].max(c[3])]));
+        }
+        let margin = |room: Option<f64>, default: i64| match room {
+            Some(pt) => ((pt * 20.0).round() as i64).clamp(default.min(360), default),
+            None => default,
+        };
+        Section {
+            w,
+            h,
+            top: margin(bbox.map(|b| ph - b[3]), dy),
+            right: margin(bbox.map(|b| pw - b[2]), dx),
+            bottom: margin(bbox.map(|b| b[1]), dy),
+            left: margin(bbox.map(|b| b[0]), dx),
+        }
+    }
+
+    /// The text width, in twips.
+    fn text_width(&self) -> i64 {
+        (self.w - self.left - self.right).max(144)
+    }
+
+    fn xml(&self) -> String {
+        let orient = if self.w > self.h { " w:orient=\"landscape\"" } else { "" };
+        format!(
+            "<w:sectPr><w:pgSz w:w=\"{}\" w:h=\"{}\"{orient}/><w:pgMar w:top=\"{}\" w:right=\"{}\" w:bottom=\"{}\" w:left=\"{}\" w:header=\"{}\" w:footer=\"{}\" w:gutter=\"0\"/></w:sectPr>",
+            self.w,
+            self.h,
+            self.top,
+            self.right,
+            self.bottom,
+            self.left,
+            self.top / 2,
+            self.bottom / 2
+        )
+    }
+}
+
 /// A Word document (.docx, Office Open XML): Heading 1/2 and Normal paragraphs, images inline at
-/// their size on the page, page breaks between pages.
+/// their size on the page, one section per PDF page with that page's size and margins.
 pub fn docx(pages: &[Page], title: &str) -> Vec<u8> {
-    // The first page's size, within what Word accepts (0.1 to 22 in; a long receipt is taller),
-    // in twips. Margins are 1 in, less on small pages so text keeps room.
-    let twips = |pt: f64| if pt.is_finite() { (pt * 20.0).round().clamp(144.0, 31680.0) as i64 } else { 12240 };
-    let (pw, ph) = pages.first().map_or((12240, 15840), |p| (twips(p.width), twips(p.height)));
-    let (mx, my) = ((pw / 8).min(1440), (ph / 8).min(1440));
-    // Images are at most the text width, in points.
-    let text_w = (pw - 2 * mx) as f64 / 20.0;
+    let sections: Vec<Section> = pages.iter().map(Section::of).collect();
+    let letter = Section { w: 12240, h: 15840, top: 1440, right: 1440, bottom: 1440, left: 1440 };
+    let section = |i: usize| sections.get(i).copied().unwrap_or(letter);
+    let mut current = section(0);
     let mut body = String::new();
     let mut media: Vec<(String, &Image)> = Vec::new();
     // Word needs a paragraph between adjacent tables and after the last one in the body.
@@ -739,26 +814,36 @@ pub fn docx(pages: &[Page], title: &str) -> Vec<u8> {
     let run = |b: &Block| run_xml(&b.text, b.size, b.bold, b.italic);
     for it in items(pages) {
         match &it {
-            Item::Para(b, lvl) => {
-                let bidi = if b.rtl { "<w:bidi/>" } else { "" };
-                let style = match lvl {
-                    1 => format!("<w:pPr><w:pStyle w:val=\"Heading1\"/>{bidi}</w:pPr>"),
-                    2 => format!("<w:pPr><w:pStyle w:val=\"Heading2\"/>{bidi}</w:pPr>"),
-                    _ if b.rtl => "<w:pPr><w:bidi/></w:pPr>".to_string(),
+            Item::Para(b, lvl, gap) => {
+                let mut ppr = match lvl {
+                    1 => "<w:pStyle w:val=\"Heading1\"/>".to_string(),
+                    2 => "<w:pStyle w:val=\"Heading2\"/>".to_string(),
                     _ => String::new(),
                 };
-                body.push_str(&format!("<w:p>{style}{}</w:p>", run(b)));
+                if b.rtl {
+                    ppr.push_str("<w:bidi/>");
+                }
+                // The space the PDF leaves above the paragraph, less the leading Word adds to
+                // a line anyway; none after (the next paragraph says its own).
+                if *gap > 0.0 {
+                    let size = if b.size.is_finite() { b.size.clamp(1.0, 200.0) } else { 11.0 };
+                    let before = ((gap - 0.2 * size).clamp(0.0, 72.0) * 20.0).round() as i64;
+                    ppr.push_str(&format!("<w:spacing w:before=\"{before}\" w:after=\"0\"/>"));
+                }
+                let ppr = if ppr.is_empty() { ppr } else { format!("<w:pPr>{ppr}</w:pPr>") };
+                body.push_str(&format!("<w:p>{ppr}{}</w:p>", run(b)));
             }
             Item::Table(t) => {
                 if after_table {
                     body.push_str("<w:p/>");
                 }
-                body.push_str(&docx_table(t, pw - 2 * mx));
+                body.push_str(&docx_table(t, current.text_width()));
             }
             Item::Img(im) => {
                 let n = media.len() + 1;
                 let name = format!("image{n}.{}", im.ext);
                 // Size on the page, in EMU (12700 per point), at most the text width.
+                let text_w = current.text_width() as f64 / 20.0;
                 let (w, h) = ((im.rect[2] - im.rect[0]).max(1.0), (im.rect[3] - im.rect[1]).max(1.0));
                 let k = (text_w / w).min(1.0);
                 let (cx, cy) = ((w * k * 12700.0) as i64, (h * k * 12700.0) as i64);
@@ -772,7 +857,12 @@ pub fn docx(pages: &[Page], title: &str) -> Vec<u8> {
                 ));
                 media.push((name, im));
             }
-            Item::PageBreak => body.push_str("<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>"),
+            Item::PageBreak(n) => {
+                // A section ends with a paragraph carrying its properties; the next one starts
+                // on a new page with its own size.
+                body.push_str(&format!("<w:p><w:pPr>{}</w:pPr></w:p>", section(*n).xml()));
+                current = section(n.saturating_add(1));
+            }
         }
         after_table = matches!(it, Item::Table(_));
     }
@@ -782,10 +872,8 @@ pub fn docx(pages: &[Page], title: &str) -> Vec<u8> {
     let doc = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
 <w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" \
-xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\"><w:body>{body}\
-<w:sectPr><w:pgSz w:w=\"{pw}\" w:h=\"{ph}\"/><w:pgMar w:top=\"{my}\" w:right=\"{mx}\" w:bottom=\"{my}\" w:left=\"{mx}\" w:header=\"{}\" w:footer=\"{}\" w:gutter=\"0\"/></w:sectPr></w:body></w:document>",
-        my / 2,
-        my / 2
+xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\"><w:body>{body}{}</w:body></w:document>",
+        current.xml()
     );
     let mut types = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
@@ -878,7 +966,7 @@ pub fn rtf(pages: &[Page]) -> String {
     let mut s = String::from("{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 Helvetica;}}\n");
     for it in items(pages) {
         match it {
-            Item::Para(b, _) => {
+            Item::Para(b, _, _) => {
                 let size = (b.size * 2.0).round() as i64;
                 let mut fmt = format!("\\fs{size}");
                 if b.bold {
@@ -937,7 +1025,7 @@ pub fn rtf(pages: &[Page]) -> String {
                 }
             }
             Item::Img(_) => {}
-            Item::PageBreak => s.push_str("\\page\n"),
+            Item::PageBreak(_) => s.push_str("\\page\n"),
         }
     }
     s.push('}');
@@ -1043,6 +1131,47 @@ mod tests {
         let narrow = Page { width: 100.0, height: 200.0, ..page() };
         let xml = part(&docx(&[narrow], "Narrow"), "word/document.xml");
         assert!(xml.contains("<w:pgMar w:top=\"500\" w:right=\"250\" w:bottom=\"500\" w:left=\"250\""), "{xml}");
+    }
+
+    /// Each PDF page is a Word section with its own size, orientation and margins (the room
+    /// the PDF's content leaves, never more than 1 in), so pages don't reflow onto others.
+    #[test]
+    fn every_page_is_a_section_with_its_size_and_margins() {
+        let block = |text: &str, rect: [f64; 4]| Block { text: text.into(), rect, size: 12.0, ..Block::default() };
+        // A4 portrait, text from 36 pt to 559 pt across and up to 806 pt.
+        let a4 = Page {
+            width: 595.0,
+            height: 842.0,
+            blocks: vec![block("First", [36.0, 790.0, 559.0, 806.0]), block("Second", [36.0, 740.0, 300.0, 752.0])],
+            ..Default::default()
+        };
+        // Letter landscape, a 2 in margin on the left (more than 1 in: capped).
+        let wide = Page { width: 792.0, height: 612.0, blocks: vec![block("Wide", [144.0, 500.0, 700.0, 512.0])], ..Default::default() };
+        let xml = part(&docx(&[a4, wide, Page { width: 612.0, height: 792.0, ..Default::default() }], "Sections"), "word/document.xml");
+        assert_eq!(xml.matches("<w:sectPr>").count(), 3, "{xml}");
+        assert!(!xml.contains("w:type=\"page\""), "sections, not page breaks: {xml}");
+        assert!(
+            xml.contains(
+                "<w:p><w:pPr><w:sectPr><w:pgSz w:w=\"11900\" w:h=\"16840\"/><w:pgMar w:top=\"720\" w:right=\"720\" w:bottom=\"1440\" w:left=\"720\""
+            ),
+            "{xml}"
+        );
+        assert!(xml.contains("<w:pgSz w:w=\"15840\" w:h=\"12240\" w:orient=\"landscape\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\""), "{xml}");
+        // An empty page keeps the defaults and is the body's last section.
+        assert!(xml.ends_with("<w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/></w:sectPr></w:body></w:document>"), "{xml}");
+        // The gap between the two paragraphs (38 pt less 0.2 em of leading) is space before
+        // the second; the first on a page has none.
+        assert!(
+            xml.contains(
+                "<w:spacing w:before=\"712\" w:after=\"0\"/></w:pPr><w:r><w:rPr><w:sz w:val=\"24\"/></w:rPr><w:t xml:space=\"preserve\">Second"
+            ),
+            "{xml}"
+        );
+        assert!(xml.contains("<w:p><w:r><w:rPr><w:sz w:val=\"24\"/></w:rPr><w:t xml:space=\"preserve\">First"), "{xml}");
+        // Hostile sizes still give a valid section.
+        let odd = Page { width: f64::NAN, height: -5.0, blocks: vec![block("x", [f64::INFINITY, 0.0, 1.0, f64::NAN])], ..Default::default() };
+        let xml = part(&docx(&[odd], "Odd"), "word/document.xml");
+        assert!(xml.contains("<w:pgSz w:w=\"12240\" w:h=\"144\" w:orient=\"landscape\"/>"), "{xml}");
     }
 
     #[test]
