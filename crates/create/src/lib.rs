@@ -512,13 +512,18 @@ pub fn from_images_with_resolution(images: &[(String, Vec<u8>)], resolution: Ima
 
 // ── text ────────────────────────────────────────────────────────────────────────────────────
 
-/// Plain text set in Helvetica on pages of `page` size with 1-inch margins.
+/// Plain text set in Helvetica on pages of `page` size with 1-inch margins. Text WinAnsi can't
+/// show (Arabic) is shaped, laid out right to left where it is, and set in one embedded subset of
+/// the Arabic face shared by every page.
 pub fn from_text(title: &str, text: &str, page: (f64, f64), font_size: f64) -> Result<Document, CreateError> {
     let size = if font_size.is_finite() && font_size > 0.0 { font_size.clamp(4.0, 72.0) } else { 11.0 };
     let (w, h) = page;
     let margin = 72.0;
     let line_h = size * 1.25;
     let width = (w - 2.0 * margin).max(36.0);
+    if pdfcraft_fonts::needs_unicode_font(text) {
+        return from_unicode_text(title, text, (w, h), size, margin, line_h, width);
+    }
     let lines: Vec<String> = text
         .replace("\r\n", "\n")
         .replace('\t', "    ")
@@ -557,6 +562,61 @@ pub fn from_text(title: &str, text: &str, page: (f64, f64), font_size: f64) -> R
         let mut res = Dict::new();
         res.set(b"Font".to_vec(), Object::Dict(fonts));
         add_page(&mut doc, w, h, res, Some(c))?;
+    }
+    set_title(&mut doc, title);
+    Ok(doc)
+}
+
+/// [`from_text`] for text that needs the embedded Unicode font.
+fn from_unicode_text(title: &str, text: &str, (w, h): (f64, f64), size: f64, margin: f64, line_h: f64, width: f64) -> Result<Document, CreateError> {
+    use pdfcraft_fonts::embed::FontSubset;
+    use pdfcraft_fonts::layout::{BaseDirection, LaidLine, LineAlign};
+    use pdfcraft_fonts::paint::{PaintOptions, layout_points, paint_lines};
+    let face = pdfcraft_fonts::shaping::ShapingFace::arabic()
+        .ok_or_else(|| CreateError::Invalid("this build has no Arabic font (Noto Sans Arabic from craft-fonts), so the text can't be set".into()))?;
+    let bad = |e: &dyn std::fmt::Display| CreateError::Invalid(format!("the text can't be set: {e}"));
+    let text = text.replace("\r\n", "\n").replace('\t', "    ");
+    let per_page = (((h - 2.0 * margin) / line_h).floor() as usize).max(1);
+    // Pages of laid-out lines: a form feed starts a page, each paragraph is laid out on its own.
+    let mut pages: Vec<Vec<LaidLine>> = vec![Vec::new()];
+    for (k, chunk) in text.split('\u{c}').enumerate() {
+        if k > 0 {
+            pages.push(Vec::new());
+        }
+        for para in chunk.split('\n') {
+            for line in layout_points(face, para, size, width, BaseDirection::Auto, LineAlign::Start).map_err(|e| bad(&e))? {
+                if pages.last().is_some_and(|p| p.len() >= per_page) {
+                    pages.push(Vec::new());
+                }
+                if let Some(p) = pages.last_mut() {
+                    p.push(line);
+                }
+            }
+        }
+    }
+    let mut subset = FontSubset::new(face);
+    let opts = PaintOptions {
+        font: "F1",
+        size,
+        left: margin,
+        baseline: h - margin - size,
+        leading: line_h,
+        fake_bold: false,
+        slant: 0.0,
+        actual_text: false,
+    };
+    let mut contents = Vec::with_capacity(pages.len());
+    for lines in &pages {
+        contents.push(paint_lines(&mut subset, lines, &opts).map_err(|e| bad(&e))?);
+    }
+    let mut doc = Document::new_empty();
+    let fr = subset.write(&mut doc).map_err(|e| bad(&e))?;
+    for c in contents {
+        let mut fonts = Dict::new();
+        fonts.set(b"F1".to_vec(), Object::Ref(fr));
+        let mut res = Dict::new();
+        res.set(b"Font".to_vec(), Object::Dict(fonts));
+        add_page(&mut doc, w, h, res, Some(c.into_bytes()))?;
     }
     set_title(&mut doc, title);
     Ok(doc)

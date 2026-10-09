@@ -375,6 +375,83 @@ fn begin(kind: MarkKind, subtype: &str, matrix: [f64; 6]) -> String {
 
 const END: &str = "EMC\nQ\n";
 
+/// Lines of page marks that need the embedded Unicode font (Arabic): one subset shared by every
+/// page the mark goes on, written once the content of all pages is known.
+struct UnicodeMarks {
+    subset: pdfcraft_fonts::embed::FontSubset<'static>,
+}
+
+/// The resource name of the shared Unicode font in page resources.
+const PC_UNI: &str = "PCUni";
+
+impl UnicodeMarks {
+    /// `Some` when any of `texts` needs the Unicode font; an error when the build can't show it.
+    fn for_texts<'a>(texts: impl IntoIterator<Item = &'a str>) -> Result<Option<UnicodeMarks>, EditError> {
+        if !texts.into_iter().any(pdfcraft_fonts::needs_unicode_font) {
+            return Ok(None);
+        }
+        let face = pdfcraft_fonts::shaping::ShapingFace::arabic().ok_or_else(|| {
+            EditError::Invalid("this build has no Arabic font (Noto Sans Arabic from craft-fonts), so the text can't be added".into())
+        })?;
+        Ok(Some(UnicodeMarks { subset: pdfcraft_fonts::embed::FontSubset::new(face) }))
+    }
+
+    /// One line laid out for drawing, and its width in points.
+    fn line(&self, text: &str, size: f64) -> Result<(pdfcraft_fonts::layout::LaidLine, f64), EditError> {
+        use pdfcraft_fonts::layout::{BaseDirection, LineAlign};
+        let face = self.subset.face();
+        let mut lines = pdfcraft_fonts::paint::layout_points(face, text, size, 1e7, BaseDirection::Auto, LineAlign::Left)
+            .map_err(|e| EditError::Invalid(format!("the text can't be added: {e}")))?;
+        let mut line = lines.drain(..).next().ok_or_else(|| EditError::Invalid("the text can't be added".into()))?;
+        line.x = 0;
+        let w = line.advance() as f64 * size / f64::from(face.units_per_em().max(1));
+        Ok((line, w))
+    }
+
+    /// `BT … ET` drawing `line` with its left end at (`x`, `y`).
+    fn ops(&mut self, line: &pdfcraft_fonts::layout::LaidLine, x: f64, y: f64, size: f64) -> Result<Vec<u8>, EditError> {
+        let opts = pdfcraft_fonts::paint::PaintOptions {
+            font: PC_UNI,
+            size,
+            left: x,
+            baseline: y,
+            leading: size,
+            fake_bold: false,
+            slant: 0.0,
+            actual_text: false,
+        };
+        pdfcraft_fonts::paint::paint_lines(&mut self.subset, std::slice::from_ref(line), &opts)
+            .map(String::into_bytes)
+            .map_err(|e| EditError::Invalid(format!("the text can't be added: {e}")))
+    }
+
+    /// Write the font into `doc`.
+    fn write(&self, doc: &mut Document) -> Result<pdfcraft_cos::ObjRef, EditError> {
+        self.subset.write(doc).map_err(|e| EditError::Invalid(format!("the text can't be added: {e}")))
+    }
+}
+
+/// Make the shared Unicode font available to a page as `/PCUni`.
+fn add_unicode_font(doc: &mut Document, page: usize, font: pdfcraft_cos::ObjRef) -> Result<(), EditError> {
+    let p = page_list(doc).swap_remove(page);
+    let mut res = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
+    let mut fonts = res.get(b"Font").map(|f| doc.resolve(f)).and_then(|f| f.as_dict().cloned()).unwrap_or_default();
+    fonts.set(PC_UNI.as_bytes().to_vec(), Object::Ref(font));
+    res.set(b"Font".to_vec(), Object::Dict(fonts));
+    doc.update_dict(p.obj, |d| d.set(b"Resources".to_vec(), Object::Dict(res)))?;
+    Ok(())
+}
+
+/// Run an edit all or nothing: on error the document is exactly as it was.
+fn atomic<T>(doc: &mut Document, f: impl FnOnce(&mut Document) -> Result<T, EditError>) -> Result<T, EditError> {
+    let before = doc.clone();
+    let result = f(doc);
+    if result.is_err() {
+        *doc = before;
+    }
+    result
+}
+
 fn text_op(x: f64, y: f64, text: &str) -> Vec<u8> {
     let mut v = format!("1 0 0 1 {} {} Tm ", n(x), n(y)).into_bytes();
     v.extend(literal(&win_ansi(text)));
@@ -385,6 +462,10 @@ fn text_op(x: f64, y: f64, text: &str) -> Vec<u8> {
 /// Add a header and footer to `pages` (0-based). With `replace`, existing headers and footers on
 /// those pages are removed first (Acrobat's Replace Existing).
 pub fn add_header_footer(doc: &mut Document, pages: &[usize], hf: &HeaderFooter, replace: bool, cx: &Context) -> Result<(), EditError> {
+    atomic(doc, |doc| add_header_footer_inner(doc, pages, hf, replace, cx))
+}
+
+fn add_header_footer_inner(doc: &mut Document, pages: &[usize], hf: &HeaderFooter, replace: bool, cx: &Context) -> Result<(), EditError> {
     let all = page_list(doc);
     check(pages, all.len())?;
     if hf.text.iter().all(|t| t.trim().is_empty()) {
@@ -399,6 +480,8 @@ pub fn add_header_footer(doc: &mut Document, pages: &[usize], hf: &HeaderFooter,
     let all = page_list(doc);
     let count = all.len();
     let bates0 = hf.text.iter().find_map(|t| bates_start(t)).unwrap_or(1);
+    let mut uni = UnicodeMarks::for_texts(hf.text.iter().map(String::as_str))?;
+    let mut placed: Vec<(usize, Vec<u8>)> = Vec::with_capacity(pages.len());
     for (k, &i) in pages.iter().enumerate() {
         let page = &all[i];
         let (w, h) = page.display_size(doc);
@@ -408,6 +491,7 @@ pub fn add_header_footer(doc: &mut Document, pages: &[usize], hf: &HeaderFooter,
         let [top, bottom, left, right] = hf.margins;
         let mut body: Vec<u8> = format!("BT\n/PCHelv {} Tf\n{}\n", n(size), rgb(hf.color)).into_bytes();
         let mut underlines = String::new();
+        let mut unicode_ops: Vec<u8> = Vec::new();
         for (slot, template) in hf.text.iter().enumerate() {
             if template.trim().is_empty() {
                 continue;
@@ -416,7 +500,11 @@ pub fn add_header_footer(doc: &mut Document, pages: &[usize], hf: &HeaderFooter,
             let header = slot < 3;
             let line_h = size * 1.2;
             for (li, line) in lines.iter().enumerate() {
-                let tw = helvetica_width(line, size);
+                let shaped = match uni.as_ref() {
+                    Some(u) if pdfcraft_fonts::needs_unicode_font(line) => Some(u.line(line, size)?),
+                    _ => None,
+                };
+                let tw = shaped.as_ref().map_or_else(|| helvetica_width(line, size), |(_, w)| *w);
                 let x = match slot % 3 {
                     0 => left,
                     1 => (w - tw) / 2.0,
@@ -424,20 +512,33 @@ pub fn add_header_footer(doc: &mut Document, pages: &[usize], hf: &HeaderFooter,
                 };
                 // Headers hang below the top margin; footers sit on the bottom margin.
                 let y = if header { h - top - size * 0.8 - li as f64 * line_h } else { bottom + (lines.len() - 1 - li) as f64 * line_h };
-                body.extend(text_op(x, y, line));
+                match (&shaped, uni.as_mut()) {
+                    (Some((l, _)), Some(u)) => unicode_ops.extend(u.ops(l, x, y, size)?),
+                    _ => body.extend(text_op(x, y, line)),
+                }
                 if hf.underline {
                     underlines.push_str(&format!("{} {} {} {} re f\n", n(x), n(y - size * 0.15), n(tw), n((size * 0.06).max(0.4))));
                 }
             }
         }
         body.extend_from_slice(b"ET\n");
+        body.extend(unicode_ops);
         if !underlines.is_empty() {
             body.extend(format!("{}\n{underlines}", rgb(hf.color)).bytes());
         }
         let mut content = begin(MarkKind::HeaderFooter, "Header", page.view_matrix(doc)).into_bytes();
         content.extend(body);
         content.extend_from_slice(END.as_bytes());
-        add_resources(doc, page, None, None)?;
+        placed.push((i, content));
+    }
+    // The shared Unicode font is written once every page's text is known to be drawable.
+    let font = uni.as_ref().map(|u| u.write(doc)).transpose()?;
+    for (i, content) in placed {
+        let page = page_list(doc).swap_remove(i);
+        add_resources(doc, &page, None, None)?;
+        if let Some(f) = font {
+            add_unicode_font(doc, i, f)?;
+        }
         let page = &page_list(doc)[i];
         place(doc, page, MarkKind::HeaderFooter, content, false)?;
     }
@@ -446,6 +547,10 @@ pub fn add_header_footer(doc: &mut Document, pages: &[usize], hf: &HeaderFooter,
 
 /// Add a text watermark to `pages`.
 pub fn add_watermark(doc: &mut Document, pages: &[usize], wm: &Watermark, replace: bool) -> Result<(), EditError> {
+    atomic(doc, |doc| add_watermark_inner(doc, pages, wm, replace))
+}
+
+fn add_watermark_inner(doc: &mut Document, pages: &[usize], wm: &Watermark, replace: bool) -> Result<(), EditError> {
     let all = page_list(doc);
     check(pages, all.len())?;
     let text = wm.text.trim();
@@ -460,6 +565,16 @@ pub fn add_watermark(doc: &mut Document, pages: &[usize], wm: &Watermark, replac
     }
     let opacity = wm.opacity.clamp(0.0, 1.0);
     let lines: Vec<&str> = text.lines().collect();
+    let mut uni = if wm.source.is_none() { UnicodeMarks::for_texts(lines.iter().copied())? } else { None };
+    // Lines drawn with the Unicode font, laid out once (width at 1 pt for sizing).
+    let shaped: Vec<Option<(pdfcraft_fonts::layout::LaidLine, f64)>> = lines
+        .iter()
+        .map(|l| match uni.as_ref() {
+            Some(u) if pdfcraft_fonts::needs_unicode_font(l) => u.line(l, 1.0).map(Some),
+            _ => Ok(None),
+        })
+        .collect::<Result<_, _>>()?;
+    let mut placed: Vec<(usize, Vec<u8>)> = Vec::new();
     for &i in pages {
         let page = page_list(doc)[i].clone();
         let (w, h) = page.display_size(doc);
@@ -474,7 +589,9 @@ pub fn add_watermark(doc: &mut Document, pages: &[usize], wm: &Watermark, replac
             place(doc, page, MarkKind::Watermark, content.into_bytes(), wm.behind)?;
             continue;
         }
-        let widest = lines.iter().map(|l| helvetica_width(l, 1.0)).fold(0.0, f64::max).max(0.01);
+        let width_at =
+            |k: usize, l: &str, size: f64| shaped.get(k).and_then(Option::as_ref).map_or_else(|| helvetica_width(l, size), |(_, w)| w * size);
+        let widest = lines.iter().enumerate().map(|(k, l)| width_at(k, l, 1.0)).fold(0.0, f64::max).max(0.01);
         let size = if wm.font_size > 0.0 { wm.font_size } else { ((w * w + h * h).sqrt() * 0.5 / widest).clamp(6.0, 300.0) };
         let (s, c) = wm.rotation.to_radians().sin_cos();
         let (cx, cy) = (w / 2.0 + wm.offset[0], h / 2.0 + wm.offset[1]);
@@ -496,13 +613,27 @@ pub fn add_watermark(doc: &mut Document, pages: &[usize], wm: &Watermark, replac
         );
         let line_h = size * 1.15;
         let total = line_h * (lines.len() as f64 - 1.0);
+        let mut unicode_ops = Vec::new();
         for (li, line) in lines.iter().enumerate() {
-            let tw = helvetica_width(line, size);
-            content.extend(text_op(-tw / 2.0, total / 2.0 - li as f64 * line_h - size * 0.35, line));
+            let tw = width_at(li, line, size);
+            let (x, y) = (-tw / 2.0, total / 2.0 - li as f64 * line_h - size * 0.35);
+            match (shaped.get(li).and_then(Option::as_ref), uni.as_mut()) {
+                (Some((l, _)), Some(u)) => unicode_ops.extend(u.ops(l, x, y, size)?),
+                _ => content.extend(text_op(x, y, line)),
+            }
         }
         content.extend_from_slice(b"ET\n");
+        content.extend(unicode_ops);
         content.extend_from_slice(END.as_bytes());
+        placed.push((i, content));
+    }
+    let font = uni.as_ref().map(|u| u.write(doc)).transpose()?;
+    for (i, content) in placed {
+        let page = page_list(doc).swap_remove(i);
         add_resources(doc, &page, Some(opacity), None)?;
+        if let Some(f) = font {
+            add_unicode_font(doc, i, f)?;
+        }
         let page = &page_list(doc)[i];
         place(doc, page, MarkKind::Watermark, content, wm.behind)?;
     }

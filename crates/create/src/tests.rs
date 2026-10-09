@@ -273,3 +273,25 @@ fn source_kind_tells_pdfs_images_and_text_apart() {
     assert_eq!(source_kind("a.docx", b"PK\x03\x04"), None);
     assert_eq!(source_kind("", b""), None);
 }
+
+#[test]
+fn arabic_text_files_become_embedded_searchable_text() {
+    let text = "بسم الله الرحمن الرحيم\nهذا ملف نصي عربي.\u{c}الصفحة الثانية 2";
+    if pdfcraft_fonts::shaping::ShapingFace::arabic().is_none() {
+        eprintln!("skipping: built without the craft-fonts Arabic face (set CRAFT_FONTS_DIR)");
+        assert!(super::from_text("t", text, (595.0, 842.0), 12.0).is_err());
+        return;
+    }
+    let doc = super::from_text("عربي", text, (595.0, 842.0), 12.0).unwrap();
+    let bytes = pdfcraft_cos::write_full(&doc, &Default::default()).unwrap();
+    let back = pdfcraft_cos::Document::open(std::sync::Arc::new(bytes)).unwrap();
+    // Two pages sharing one Type0 font.
+    let mut type0 = 0;
+    for num in back.object_numbers() {
+        if back.try_get(num).unwrap().as_dict().is_some_and(|d| d.name(b"Subtype") == Some(b"Type0")) {
+            type0 += 1;
+        }
+    }
+    assert_eq!(type0, 1);
+    assert!(super::from_text("t", "سلام 日本", (595.0, 842.0), 12.0).is_err(), "text no font can show is refused");
+}

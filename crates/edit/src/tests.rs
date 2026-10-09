@@ -1048,3 +1048,34 @@ fn hostile_arabic_input_never_panics() {
         }
     }
 }
+
+#[test]
+fn arabic_headers_footers_and_watermarks_share_one_embedded_font() {
+    let mut doc = fixture();
+    let mut hf = HeaderFooter::default();
+    hf.text[1] = "تقرير سري — صفحة <<1>>".into();
+    hf.text[5] = "Page <<1 of n>>".into();
+    if pdfcraft_fonts::shaping::ShapingFace::arabic().is_none() {
+        eprintln!("skipping: built without the craft-fonts Arabic face (set CRAFT_FONTS_DIR)");
+        assert!(add_header_footer(&mut doc, &[0, 1, 2], &hf, false, &cx()).is_err());
+        assert!(!doc.is_modified());
+        return;
+    }
+    add_header_footer(&mut doc, &[0, 1, 2], &hf, false, &cx()).unwrap();
+    add_watermark(&mut doc, &[0, 2], &Watermark { text: "مسودة".into(), ..Watermark::default() }, false).unwrap();
+    let doc = reopen(&doc);
+    for page in 0..3 {
+        let fonts = page_fonts(&doc, page);
+        assert!(fonts.contains(&"PCUni".to_string()) && fonts.contains(&"PCHelv".to_string()), "page {page}: {fonts:?}");
+        let s = streams(&doc, page).join("\n");
+        assert!(s.contains("/PCUni 8 Tf") && s.contains("(Page "), "page {page}: Arabic in the embedded font, Latin in Helvetica: {s}");
+        assert!(!s.contains("(?"), "{s}");
+    }
+    // Text no font can show: refused, document unchanged.
+    let mut doc = doc;
+    let before = write_incremental(&doc, &SaveOptions::default()).unwrap();
+    hf.text[1] = "日本".into();
+    assert!(add_header_footer(&mut doc, &[0], &hf, true, &cx()).is_err());
+    assert!(add_watermark(&mut doc, &[0], &Watermark { text: "سلام 日本".into(), ..Watermark::default() }, true).is_err());
+    assert_eq!(write_incremental(&doc, &SaveOptions::default()).unwrap(), before);
+}

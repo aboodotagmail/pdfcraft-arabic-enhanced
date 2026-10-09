@@ -69,9 +69,10 @@ pub fn wrap(text: &str, size: f64, width: f64) -> Vec<String> {
 }
 
 /// Whether `s` has a character WinAnsiEncoding can't show (it would become `?`), so it needs an
-/// embedded Unicode font. Line breaks and tabs don't count.
+/// embedded Unicode font. Control characters (line breaks, tabs, form feeds) don't count: they
+/// are never drawn.
 pub fn needs_unicode_font(s: &str) -> bool {
-    s.chars().any(|c| !matches!(c, '\n' | '\r' | '\t' | '?') && win_ansi(c.encode_utf8(&mut [0; 4])) == b"?")
+    s.chars().any(|c| !c.is_control() && c != '?' && win_ansi(c.encode_utf8(&mut [0; 4])) == b"?")
 }
 
 /// Encode text in WinAnsiEncoding (ISO 32000-2 Annex D); unmappable characters become `?`.
@@ -117,6 +118,12 @@ pub fn literal(bytes: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_drawable_characters_need_the_unicode_font() {
+        assert!(!super::needs_unicode_font("Café — 5€?\n\t\u{c}\r"));
+        assert!(super::needs_unicode_font("سلام") && super::needs_unicode_font("x ☃"));
+    }
 
     #[test]
     fn widths_wrap_and_encode() {
