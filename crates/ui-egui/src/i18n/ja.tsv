@@ -1647,6 +1647,7 @@
 	Couldn't open the result: {e}	結果を開けませんでした: {e}
 	Importing data arrives on the web with file pickers for data files	Web 版のデータ読み込みはデータファイル選択に対応した際に利用可能になります
 	Exported to {path}	{path} に書き出しました
+	Exported to {path}. {n} characters have no readable meaning in the PDF and may show as boxes.	{path} に書き出しました。{n} 文字は PDF 内で読み取れる意味を持たず、四角で表示される場合があります。
 	Merging data files needs the desktop app	データファイルの結合にはデスクトップ版が必要です
 	Merged 1 file into {path}	1 ファイルを {path} に結合しました
 	Merged {n} files into {path}	{n} ファイルを {path} に結合しました

@@ -1630,6 +1630,7 @@
 	Couldn't open the result: {e}	Не удалось открыть результат: {e}
 	Importing data arrives on the web with file pickers for data files	Импорт данных появится в веб-версии с выбором файлов данных
 	Exported to {path}	Экспортировано в {path}
+	Exported to {path}. {n} characters have no readable meaning in the PDF and may show as boxes.	Экспортировано в {path}. {n} символов не имеют читаемого значения в PDF и могут отображаться квадратами.
 	Merging data files needs the desktop app	Объединение файлов данных требует настольное приложение
 	Merged 1 file into {path}	Объединён 1 файл в {path}
 	Merged {n} files into {path}	Объединено {n} файлов в {path}

@@ -616,10 +616,14 @@ impl PdfCraftApp {
         let Some(doc) = self.session.get(id) else { return };
         let stem = doc.name.trim_end_matches(".pdf").trim_end_matches(".PDF").to_string();
         let ext = format.extension();
-        let bytes = doc.export_office(format);
+        let pdfcraft_engine::compare::OfficeExport { bytes, unreadable } = doc.export_office_report(format);
         #[cfg(not(target_arch = "wasm32"))]
         {
             let write = move |app: &mut Self, path: std::path::PathBuf| match crate::editing::write_atomically(&path.to_string_lossy(), &bytes) {
+                Ok(()) if unreadable > 0 => app.notify_fmt(
+                    "Exported to {path}. {n} characters have no readable meaning in the PDF and may show as boxes.",
+                    &[("path", &path.display().to_string()), ("n", &unreadable.to_string())],
+                ),
                 Ok(()) => app.notify_fmt("Exported to {path}", &[("path", &path.display().to_string())]),
                 Err(e) => app.notify_fmt("Couldn't write {name}: {e}", &[("name", &path.display().to_string()), ("e", &e.to_string())]),
             };
@@ -634,6 +638,8 @@ impl PdfCraftApp {
                 }
             }
         }
+        #[cfg(target_arch = "wasm32")]
+        let _ = unreadable;
         #[cfg(target_arch = "wasm32")]
         if let Err(e) = crate::editing::download(&format!("{stem}.{ext}"), &bytes) {
             self.notify_error(e);

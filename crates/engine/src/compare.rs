@@ -149,6 +149,15 @@ impl OfficeFormat {
     }
 }
 
+/// An exported Word, HTML or RTF file.
+pub struct OfficeExport {
+    pub bytes: Vec<u8>,
+    /// Characters with no readable meaning in the PDF (private-use code points the font program
+    /// doesn't explain, U+FFFD): written as they are, and shown as boxes by most fonts.
+    /// `pdfcraft-cli text-audit` says where they come from.
+    pub unreadable: usize,
+}
+
 impl crate::Document {
     /// How each page's text decodes for export (counts and font names only; see
     /// `pdfcraft_edit::audit_page`). A page that can't be read gives an empty audit.
@@ -173,7 +182,9 @@ impl crate::Document {
                     .map(|b| {
                         let f = b.base_font.to_ascii_lowercase();
                         pdfcraft_export::Block {
-                            text: b.text,
+                            // Presentation-form code points (contextual glyph codes some files map
+                            // to) become the letters they show, as search and copy read them.
+                            text: pdfcraft_fonts::glyph_text::normalize_presentation_forms(&b.text).into_owned(),
                             rect: b.rect,
                             size: b.size,
                             bold: f.contains("bold") || f.contains("black") || f.contains("heavy"),
@@ -197,12 +208,24 @@ impl crate::Document {
 
     /// The document as a Word, HTML or RTF file.
     pub fn export_office(&self, format: OfficeFormat) -> Vec<u8> {
+        self.export_office_report(format).bytes
+    }
+
+    /// [`Self::export_office`], with how many exported characters have no readable meaning.
+    pub fn export_office_report(&self, format: OfficeFormat) -> OfficeExport {
         let pages = self.export_pages();
         let title = self.info.title.clone().unwrap_or_else(|| self.name.trim_end_matches(".pdf").to_string());
-        match format {
+        let unreadable = pages
+            .iter()
+            .flat_map(|p| &p.blocks)
+            .flat_map(|b| b.text.chars())
+            .filter(|c| *c == '\u{FFFD}' || pdfcraft_fonts::glyph_text::is_private_use(*c))
+            .count();
+        let bytes = match format {
             OfficeFormat::Docx => pdfcraft_export::docx(&pages, &title),
             OfficeFormat::Html => pdfcraft_export::html(&pages, &title).into_bytes(),
             OfficeFormat::Rtf => pdfcraft_export::rtf(&pages).into_bytes(),
-        }
+        };
+        OfficeExport { bytes, unreadable }
     }
 }

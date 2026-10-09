@@ -1595,6 +1595,7 @@
 	Couldn't open the result: {e}	无法打开结果：{e}
 	Importing data arrives on the web with file pickers for data files	Web 端导入数据将使用数据文件选择器
 	Exported to {path}	已导出到{path}
+	Exported to {path}. {n} characters have no readable meaning in the PDF and may show as boxes.	已导出到{path}。PDF 中有 {n} 个字符没有可读的含义，可能显示为方框。
 	Merging data files needs the desktop app	合并数据文件需要桌面端应用
 	Merged 1 file into {path}	已将 1 个文件合并到{path}
 	Merged {n} files into {path}	已将{n}个文件合并到{path}

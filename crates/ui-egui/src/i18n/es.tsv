@@ -1641,6 +1641,7 @@
 	Couldn't open the result: {e}	No se pudo abrir el resultado: {e}
 	Importing data arrives on the web with file pickers for data files	Importar datos llegará a la versión web con los selectores de archivos de datos
 	Exported to {path}	Exportado a {path}
+	Exported to {path}. {n} characters have no readable meaning in the PDF and may show as boxes.	Exportado a {path}. {n} caracteres no tienen un significado legible en el PDF y pueden aparecer como cuadros.
 	Merging data files needs the desktop app	Combinar archivos de datos requiere la aplicación de escritorio
 	Merged 1 file into {path}	Se ha combinado 1 archivo en {path}
 	Merged {n} files into {path}	Se han combinado {n} archivos en {path}

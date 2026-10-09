@@ -265,9 +265,9 @@ impl Automation {
         let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
         let format = pdfcraft_engine::compare::OfficeFormat::from_extension(&ext)
             .ok_or_else(|| ToolError::InvalidArgs(format!("unsupported extension {ext:?} (docx, html or rtf)")))?;
-        let bytes = self.doc(a)?.export_office(format);
-        write_atomic(&path, &bytes)?;
-        Ok(json!({ "path": path.to_string_lossy(), "bytes": bytes.len(), "format": format.extension() }))
+        let out = self.doc(a)?.export_office_report(format);
+        write_atomic(&path, &out.bytes)?;
+        Ok(json!({ "path": path.to_string_lossy(), "bytes": out.bytes.len(), "format": format.extension(), "unreadable_chars": out.unreadable }))
     }
 
     fn pdfa_level(&self, a: &Args) -> Result<pdfcraft_engine::pdfa::Level> {

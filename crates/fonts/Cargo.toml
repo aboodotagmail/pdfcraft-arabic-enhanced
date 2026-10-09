@@ -17,3 +17,4 @@ skrifa = "0.44"
 harfrust = "0.12"
 # Unicode bidirectional algorithm (UAX #9) for right-to-left and mixed-direction lines.
 unicode-bidi = "0.3"
+unicode-normalization = "0.1"

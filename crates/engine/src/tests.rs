@@ -2136,3 +2136,52 @@ fn comments_without_appearances_are_drawn_but_not_saved() {
         assert!(reopened.get(r).as_dict().is_some_and(|d| !d.contains(b"AP")), "{r:?} is saved without /AP");
     }
 }
+
+/// A one-page PDF whose font F1 (composite, Identity-H) maps codes 1-4 through `tounicode`.
+fn composite_text_pdf(tounicode: &str, content: &str) -> Vec<u8> {
+    let cmap = format!(
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap 1 begincodespacerange <0000> <FFFF> endcodespacerange {tounicode} endcmap end end"
+    );
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".into(),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+        "<< /Type /Font /Subtype /Type0 /BaseFont /ABCDEF+SakkalMajalla /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 7 0 R >>".into(),
+        "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /ABCDEF+SakkalMajalla /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 500 >>".into(),
+        format!("<< /Length {} >>\nstream\n{cmap}\nendstream", cmap.len()),
+    ];
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offs = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offs.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let x = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offs {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes());
+    out
+}
+
+/// Word export of text mapped to Arabic presentation forms writes the letters they show, and a
+/// private-use code point nothing explains is counted as unreadable instead of passing silently.
+#[test]
+fn office_export_writes_letters_and_counts_unreadable_characters() {
+    // سلم drawn right to left as final meem, medial lam, initial seen (presentation forms), then
+    // one code mapped to a private-use code point.
+    let pdf = composite_text_pdf(
+        "4 beginbfchar <0001> <FEE2> <0002> <FEE0> <0003> <FEB3> <0004> <E123> endbfchar",
+        "BT /F1 20 Tf 300 700 Td <000100020003> Tj ET BT /F1 20 Tf 300 600 Td <0004> Tj ET",
+    );
+    let mut s = Session::new();
+    let id = s.open("p.pdf", None, std::sync::Arc::new(pdf), None).unwrap();
+    let d = s.get(id).unwrap();
+    let out = d.export_office_report(compare::OfficeFormat::Docx);
+    assert_eq!(out.unreadable, 1);
+    let texts: Vec<String> = d.export_pages()[0].blocks.iter().map(|b| b.text.clone()).collect();
+    assert!(texts.iter().any(|t| t == "سلم"), "{texts:?}");
+    assert!(texts.iter().all(|t| !t.chars().any(|c| ('\u{FE70}'..='\u{FEFF}').contains(&c))), "{texts:?}");
+}

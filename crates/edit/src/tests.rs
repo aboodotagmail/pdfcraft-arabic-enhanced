@@ -1392,3 +1392,100 @@ fn text_audit_counts_unmapped_and_private_use_codes() {
     assert_eq!(a.chars.private_use, 1);
     assert_eq!(a.fonts, [FontAudit { base_font: "ABCDEF+SakkalMajalla".into(), codes: 4, unmapped: 2 }]);
 }
+
+/// Page 3 of the fixture drawing `word` as the shaped glyphs of the full Noto Sans Arabic program
+/// (embedded as FontFile2, CID = glyph id), with the ToUnicode map `tounicode(gid, text)` builds
+/// (`None`: no ToUnicode at all). How Word-made PDFs often look: contextual forms unmapped, or
+/// mapped to private-use code points. Synthetic: built at test time from the OFL face.
+/// Builds a ToUnicode destination (hex) for a glyph and its cluster's text.
+type ToUnicodeOf<'a> = &'a dyn Fn(u16, &str) -> String;
+
+fn arabic_glyph_page(word: &str, tounicode: Option<ToUnicodeOf<'_>>) -> Option<Document> {
+    let face = pdfcraft_fonts::shaping::ShapingFace::arabic()?;
+    let clusters = face.shape(word, true).ok()?;
+    // (glyph, its cluster's text, cluster index), in drawing order.
+    let gids: Vec<(u16, String, usize)> =
+        clusters.iter().enumerate().flat_map(|(i, c)| c.glyphs.iter().map(move |g| (g.gid, c.text.clone(), i))).collect();
+    let mut doc = fixture();
+    let program = doc.add(Object::Stream(Stream::flate(
+        {
+            let mut d = Dict::new();
+            d.set(b"Length1".to_vec(), Object::Int(face.bytes().len() as i64));
+            d
+        },
+        face.bytes(),
+    )));
+    let mut fd = Dict::new();
+    fd.set(b"Type".to_vec(), Object::name("FontDescriptor"));
+    fd.set(b"FontName".to_vec(), Object::name("ABCDEF+NotoSansArabic"));
+    fd.set(b"Flags".to_vec(), Object::Int(4));
+    fd.set(b"FontFile2".to_vec(), Object::Ref(program));
+    let fd = doc.add(Object::Dict(fd));
+    let mut cid = Dict::new();
+    cid.set(b"Type".to_vec(), Object::name("Font"));
+    cid.set(b"Subtype".to_vec(), Object::name("CIDFontType2"));
+    cid.set(b"BaseFont".to_vec(), Object::name("ABCDEF+NotoSansArabic"));
+    cid.set(b"CIDToGIDMap".to_vec(), Object::name("Identity"));
+    cid.set(b"DW".to_vec(), Object::Int(500));
+    cid.set(b"FontDescriptor".to_vec(), Object::Ref(fd));
+    let cid = doc.add(Object::Dict(cid));
+    let mut t0 = Dict::new();
+    t0.set(b"Type".to_vec(), Object::name("Font"));
+    t0.set(b"Subtype".to_vec(), Object::name("Type0"));
+    t0.set(b"BaseFont".to_vec(), Object::name("ABCDEF+NotoSansArabic"));
+    t0.set(b"Encoding".to_vec(), Object::name("Identity-H"));
+    t0.set(b"DescendantFonts".to_vec(), Object::Array(vec![Object::Ref(cid)]));
+    if let Some(f) = tounicode {
+        // One entry per cluster, on its first glyph, as producers write it; `f` gives the text.
+        let mut seen = std::collections::HashSet::new();
+        let firsts: Vec<&(u16, String, usize)> = gids.iter().filter(|(_, _, c)| seen.insert(*c)).collect();
+        let entries: String = firsts.iter().map(|(g, t, _)| format!("<{g:04X}> <{}>\n", f(*g, t))).collect();
+        let cmap = format!(
+            "/CIDInit /ProcSet findresource begin 12 dict begin begincmap 1 begincodespacerange <0000> <FFFF> endcodespacerange {} beginbfchar\n{entries}endbfchar endcmap end end",
+            firsts.len()
+        );
+        let tu = doc.add(Object::Stream(Stream::flate(Dict::new(), cmap.as_bytes())));
+        t0.set(b"ToUnicode".to_vec(), Object::Ref(tu));
+    }
+    let font = doc.add(Object::Dict(t0));
+    let hex: String = gids.iter().map(|(g, _, _)| format!("{g:04X}")).collect();
+    let content = doc.add(Object::Stream(Stream::flate(Dict::new(), format!("BT /FAr 20 Tf 300 700 Td <{hex}> Tj ET").as_bytes())));
+    let p = page_list(&doc).swap_remove(2);
+    let mut fonts = Dict::new();
+    fonts.set(b"FAr".to_vec(), Object::Ref(font));
+    let mut res = Dict::new();
+    res.set(b"Font".to_vec(), Object::Dict(fonts));
+    doc.update_dict(p.obj, |d| {
+        d.set(b"Contents".to_vec(), Object::Ref(content));
+        d.set(b"Resources".to_vec(), Object::Dict(res));
+    })
+    .unwrap();
+    Some(reopen(&doc))
+}
+
+/// UTF-16BE hex of `text`, as a ToUnicode destination.
+fn utf16_hex(text: &str) -> String {
+    text.encode_utf16().map(|u| format!("{u:04X}")).collect()
+}
+
+/// Squares in exported Word files: contextual Arabic glyphs with no ToUnicode entry (dropped), or
+/// mapped to private-use code points (drawn as boxes). The embedded program says what each
+/// glyph is (cmap, GSUB forms and ligatures), so the text reads back whole either way.
+#[test]
+fn arabic_glyphs_without_usable_tounicode_read_from_the_font_program() {
+    let Some(_) = pdfcraft_fonts::shaping::ShapingFace::arabic() else { return };
+    let word = "سلام عليكم";
+    let none = arabic_glyph_page(word, None).unwrap();
+    let private = arabic_glyph_page(word, Some(&|g, _| format!("{:04X}", 0xE000 + u32::from(g)))).unwrap();
+    let right = arabic_glyph_page(word, Some(&|_, t| utf16_hex(t))).unwrap();
+    for (name, doc) in [("no ToUnicode", &none), ("private-use ToUnicode", &private), ("correct ToUnicode", &right)] {
+        let lines = text::reading_blocks(doc, 2).unwrap();
+        assert_eq!(lines.iter().map(|b| b.text.as_str()).collect::<Vec<_>>(), [word], "{name}");
+        let a = audit_page(doc, 2).unwrap();
+        assert_eq!(a.chars.private_use, 0, "{name}: {a:?}");
+    }
+    // Without ToUnicode every glyph is explained by the program; a correct map leaves the second
+    // glyph of a letter drawn in two (ي: dotless base + dots) out on purpose, and it stays out.
+    assert_eq!(audit_page(&none, 2).unwrap().unmapped, 0);
+    assert_eq!(audit_page(&right, 2).unwrap().unmapped, 1);
+}

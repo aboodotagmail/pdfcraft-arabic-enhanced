@@ -1569,6 +1569,7 @@ action wizard	Start	ప్రారంభించు
 	Couldn't open the result: {e}	ఫలితాన్ని తెరవడం సాధ్యం కాలేదు: {e}
 	Importing data arrives on the web with file pickers for data files	డేటాను దిగుమతి చేయడం, డేటా ఫైల్‌ల కోసం ఫైల్ పికర్‌లతో పాటు వెబ్‌లో వస్తుంది
 	Exported to {path}	{path}కు ఎగుమతి చేయబడింది
+	Exported to {path}. {n} characters have no readable meaning in the PDF and may show as boxes.	{path}కు ఎగుమతి చేయబడింది. PDFలో {n} అక్షరాలకు చదవగలిగే అర్థం లేదు, అవి పెట్టెలుగా కనిపించవచ్చు.
 	Merging data files needs the desktop app	డేటా ఫైల్‌లను విలీనం చేయడానికి డెస్క్‌టాప్ యాప్ అవసరం
 	Merged 1 file into {path}	1 ఫైల్ {path}లో విలీనం చేయబడింది
 	Merged {n} files into {path}	{n} ఫైల్‌లు {path}లో విలీనం చేయబడ్డాయి

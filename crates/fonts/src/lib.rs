@@ -8,6 +8,7 @@
 mod craft;
 pub mod embed;
 mod encodings;
+pub mod glyph_text;
 pub mod layout;
 pub mod paint;
 pub mod pdf;

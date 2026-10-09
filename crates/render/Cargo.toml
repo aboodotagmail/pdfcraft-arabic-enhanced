@@ -17,7 +17,6 @@ kurbo = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 # Arabic presentation forms to the letters they show (NFKC), for text extraction and search.
-unicode-normalization = "0.1"
 
 # lopdf (bootstrap) draws random bytes for encryption; on the web they come from the browser.
 [target.'cfg(target_arch = "wasm32")'.dependencies]

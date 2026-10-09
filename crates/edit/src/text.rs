@@ -401,16 +401,29 @@ fn interpret(
                 for p in &pieces {
                     match p {
                         Object::String(s) => {
-                            for (code, len) in m.codes(&s.bytes) {
+                            let codes = m.codes(&s.bytes);
+                            let just: Vec<u32> = codes.iter().map(|c| c.0).collect();
+                            // Codes still to read as part of a glyph sequence already read.
+                            let mut covered = 0usize;
+                            for (k, &(code, len)) in codes.iter().enumerate() {
                                 n_codes = n_codes.saturating_add(1);
-                                match m.text_of(code) {
-                                    Some(t) => {
-                                        text.push_str(t);
-                                        units.push((t.to_string(), trm0.apply(x_text, ts.rise).0));
-                                    }
-                                    None => {
-                                        decodable = false;
-                                        n_unmapped = n_unmapped.saturating_add(1);
+                                if covered > 0 {
+                                    covered -= 1;
+                                } else if let Some((t, n)) = m.sequence_text(just.get(k..).unwrap_or_default()) {
+                                    // A letter the font draws as several glyphs (a base and its dots).
+                                    text.push_str(t);
+                                    units.push((t.to_string(), trm0.apply(x_text, ts.rise).0));
+                                    covered = n.saturating_sub(1);
+                                } else {
+                                    match m.text_of(code) {
+                                        Some(t) => {
+                                            text.push_str(t);
+                                            units.push((t.to_string(), trm0.apply(x_text, ts.rise).0));
+                                        }
+                                        None => {
+                                            decodable = false;
+                                            n_unmapped = n_unmapped.saturating_add(1);
+                                        }
                                     }
                                 }
                                 let w = m.width(code) * ts.size + ts.char_spacing + if m.is_space(code, len) { ts.word_spacing } else { 0.0 };

@@ -56,7 +56,38 @@ pub struct Metrics {
     pub italic: bool,
     /// Bytes per code for writing new text (1 for simple fonts, else the codespace length).
     code_len: usize,
+    /// The embedded TrueType program of a composite font, read for codes `/ToUnicode` maps to
+    /// private-use code points, or for every code when the font has no `/ToUnicode`.
+    program: Option<GlyphSource>,
+    /// Whether the font has a `/ToUnicode` map. A code it leaves out is then left out on
+    /// purpose (the second glyph of a letter drawn in two), not read from the program.
+    has_to_unicode: bool,
 }
+
+/// A composite font's embedded TrueType program, its CID → glyph map, and (worked out on first
+/// use) what each glyph shows (`crate::glyph_text`).
+#[derive(Clone)]
+struct GlyphSource {
+    bytes: std::sync::Arc<Vec<u8>>,
+    /// `None` for `/CIDToGIDMap /Identity`.
+    cid_to_gid: Option<std::sync::Arc<Vec<u16>>>,
+    texts: std::sync::Arc<std::sync::OnceLock<crate::glyph_text::GlyphTexts>>,
+}
+
+impl PartialEq for GlyphSource {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.bytes, &other.bytes) && self.cid_to_gid == other.cid_to_gid
+    }
+}
+
+impl std::fmt::Debug for GlyphSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GlyphSource").field("bytes", &self.bytes.len()).field("cid_to_gid", &self.cid_to_gid.as_ref().map(|m| m.len())).finish()
+    }
+}
+
+/// Largest embedded font program read for glyph meanings.
+const MAX_PROGRAM_BYTES: usize = 64 << 20;
 
 fn nums(doc: &Document, o: Option<&Object>) -> Vec<f64> {
     o.map(|o| doc.resolve(o))
@@ -157,6 +188,8 @@ impl Metrics {
             bold: false,
             italic: false,
             code_len: 1,
+            program: None,
+            has_to_unicode: false,
         }
     }
 
@@ -183,6 +216,7 @@ impl Metrics {
             Codes::Ranges(r) => r.last().map_or(2, |x| x.0),
         };
         m.unicode = unicode_map(doc, font, m.composite);
+        m.has_to_unicode = font.get(b"ToUnicode").is_some_and(|t| matches!(&*doc.resolve(t), Object::Stream(_)));
         m
     }
 
@@ -238,6 +272,7 @@ impl Metrics {
                 }
             }
             descriptor = dict(doc, desc.get(b"FontDescriptor"));
+            m.program = glyph_source(doc, &desc, descriptor.as_ref());
         } else {
             m.first = font.get(b"FirstChar").and_then(|f| doc.resolve(f).as_f64()).unwrap_or(0.0).max(0.0) as u32;
             m.widths = nums(doc, font.get(b"Widths"));
@@ -346,12 +381,81 @@ impl Metrics {
 impl Metrics {
     /// The text a string shows (codes without a known meaning are left out).
     pub fn decode(&self, s: &[u8]) -> String {
-        self.codes(s).into_iter().filter_map(|(c, _)| self.unicode.get(&c).cloned()).collect()
+        self.codes(s).into_iter().filter_map(|(c, _)| self.text_of(c).map(str::to_owned)).collect()
     }
 
-    /// The Unicode text of one code, if known.
+    /// The Unicode text of one code, if known: its `/ToUnicode` (or encoding) entry, else, for
+    /// a composite font with an embedded TrueType program, what that glyph shows according to
+    /// the program (`crate::glyph_text`): for a private-use entry, or for any code when the font
+    /// has no `/ToUnicode` at all.
     pub fn text_of(&self, code: u32) -> Option<&str> {
-        self.unicode.get(&code).map(String::as_str)
+        let mapped = self.unicode.get(&code).map(String::as_str);
+        if self.mapped(code) || !self.reads_program(code) {
+            return mapped;
+        }
+        self.program_text(code).or(mapped)
+    }
+
+    /// Whether `code`'s meaning comes from the embedded program: it maps to private use, or the
+    /// font has no `/ToUnicode` and the code no entry.
+    fn reads_program(&self, code: u32) -> bool {
+        match self.unicode.get(&code) {
+            Some(t) => t.chars().any(crate::glyph_text::is_private_use),
+            None => !self.has_to_unicode,
+        }
+    }
+
+    fn gid(&self, code: u32) -> Option<u16> {
+        let p = self.program.as_ref()?;
+        let cid = self.cid(code);
+        match &p.cid_to_gid {
+            None => u16::try_from(cid).ok(),
+            Some(map) => map.get(usize::try_from(cid).ok()?).copied(),
+        }
+    }
+
+    fn program_texts(&self) -> Option<&crate::glyph_text::GlyphTexts> {
+        let p = self.program.as_ref()?;
+        Some(p.texts.get_or_init(|| crate::glyph_text::font_texts(&p.bytes)))
+    }
+
+    fn program_text(&self, code: u32) -> Option<&str> {
+        let gid = self.gid(code)?;
+        let t = self.program_texts()?.glyphs.get(&gid)?;
+        (!t.chars().any(crate::glyph_text::is_private_use)).then_some(t.as_str())
+    }
+
+    /// Whether `code` has a usable `/ToUnicode` (or encoding) entry of its own.
+    fn mapped(&self, code: u32) -> bool {
+        self.unicode.get(&code).is_some_and(|t| !t.chars().any(crate::glyph_text::is_private_use))
+    }
+
+    /// If `codes` starts with glyphs the embedded program makes from one character (a letter split
+    /// into a base and its dots), that character and how many codes it covers. Only codes whose
+    /// meaning comes from the program (see [`Self::text_of`]) are read this way.
+    pub fn sequence_text(&self, codes: &[u32]) -> Option<(&str, usize)> {
+        let texts = self.program_texts()?;
+        if texts.sequences.is_empty() || codes.first().is_none_or(|c| !self.reads_program(*c)) {
+            return None;
+        }
+        let max = codes.len().min(crate::glyph_text::MAX_SEQUENCE);
+        for n in (2..=max).rev() {
+            // After the first code, codes the map leaves out are the rest of the same letter.
+            let readable =
+                |(k, c): (usize, &u32)| if self.reads_program(*c) || (k > 0 && !self.unicode.contains_key(c)) { self.gid(*c) } else { None };
+            let Some(mut gids) = codes.get(..n)?.iter().enumerate().map(readable).collect::<Option<Vec<u16>>>() else {
+                continue;
+            };
+            if let Some(t) = texts.sequences.get(&gids) {
+                return Some((t.as_str(), n));
+            }
+            // Right-to-left runs are drawn with a character's glyphs the other way round.
+            gids.reverse();
+            if let Some(t) = texts.sequences.get(&gids) {
+                return Some((t.as_str(), n));
+            }
+        }
+        None
     }
 
     /// Whether the font has a glyph for `code` (subset fonts lack the glyphs they don't use).
@@ -456,6 +560,26 @@ pub fn glyph_unicode(name: &str) -> Option<char> {
     }
     let hex = name.strip_prefix("uni").filter(|h| h.len() == 4).or_else(|| name.strip_prefix('u').filter(|h| (4..=6).contains(&h.len())))?;
     u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+}
+
+/// A CIDFontType2's embedded TrueType program and CID → glyph map (`None` if there is none).
+fn glyph_source(doc: &Document, cid_font: &Dict, descriptor: Option<&Dict>) -> Option<GlyphSource> {
+    if cid_font.name(b"Subtype") != Some(b"CIDFontType2") {
+        return None;
+    }
+    let file = descriptor?.get(b"FontFile2").map(|f| doc.resolve(f))?;
+    let Object::Stream(s) = &*file else { return None };
+    let bytes = s.decoded().ok().filter(|b| !b.is_empty() && b.len() <= MAX_PROGRAM_BYTES)?;
+    let cid_to_gid = match cid_font.get(b"CIDToGIDMap").map(|m| doc.resolve(m)).as_deref() {
+        Some(Object::Stream(m)) => {
+            let data = m.decoded().ok()?;
+            // `chunks_exact(2)` yields slices of exactly two bytes: the indexing cannot fail.
+            let map: Vec<u16> = data.chunks_exact(2).take(1 << 16).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+            Some(std::sync::Arc::new(map))
+        }
+        _ => None,
+    };
+    Some(GlyphSource { bytes: std::sync::Arc::new(bytes), cid_to_gid, texts: std::sync::Arc::new(std::sync::OnceLock::new()) })
 }
 
 /// Code → Unicode for a font: its ToUnicode CMap, else (simple fonts) its encoding.

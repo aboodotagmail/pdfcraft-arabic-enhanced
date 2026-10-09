@@ -1553,6 +1553,7 @@
 	Couldn't open the result: {e}	無法開啟結果：{e}
 	Importing data arrives on the web with file pickers for data files	Web 端匯入資料將使用資料檔案選擇器
 	Exported to {path}	已匯出到{path}
+	Exported to {path}. {n} characters have no readable meaning in the PDF and may show as boxes.	已匯出到{path}。PDF 中有 {n} 個字元沒有可讀的含義，可能顯示為方框。
 	Merging data files needs the desktop app	合併資料檔案需要桌面端應用
 	Merged 1 file into {path}	已將 1 個檔案合併到{path}
 	Merged {n} files into {path}	已將{n}個檔案合併到{path}

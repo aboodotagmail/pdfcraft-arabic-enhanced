@@ -373,25 +373,8 @@ fn fold_arabic(c: char) -> Option<char> {
     }
 }
 
-/// Arabic presentation forms (positional letters and ligatures, U+FB50–FDFF, U+FE70–FEFF) as the
-/// letters they show (compatibility decomposition), so text from files that map glyphs to
-/// presentation forms is searchable and copies as ordinary Arabic.
-fn normalize_presentation_forms(text: &str) -> std::borrow::Cow<'_, str> {
-    use unicode_normalization::UnicodeNormalization;
-    let presentation = |c: char| matches!(c, '\u{FB50}'..='\u{FDFF}' | '\u{FE70}'..='\u{FEFE}');
-    if !text.chars().any(presentation) {
-        return std::borrow::Cow::Borrowed(text);
-    }
-    let mut out = String::with_capacity(text.len() * 2);
-    for c in text.chars() {
-        if presentation(c) {
-            out.extend(std::iter::once(c).nfkc());
-        } else {
-            out.push(c);
-        }
-    }
-    std::borrow::Cow::Owned(out)
-}
+/// Arabic presentation forms as the letters they show (shared with export).
+use pdfcraft_fonts::glyph_text::normalize_presentation_forms;
 
 use pdfcraft_fonts::layout::read_line;
 
