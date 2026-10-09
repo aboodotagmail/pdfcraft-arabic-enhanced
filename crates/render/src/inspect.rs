@@ -1008,6 +1008,37 @@ mod tests {
     }
 
     #[test]
+    fn huge_page_counts_do_not_size_allocations() {
+        // Vendored lopdf patch: the page-tree iterator's size hint summed `/Count`, and
+        // `get_pages` collected through a Vec sized from it: a fuzzed `/Count 4294967295`
+        // allocated 51 GB and aborted. The two real pages are still found.
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 4294967295 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>",
+            "<< /Type /Pages /Parent 2 0 R /Kids [5 0 R] /Count 4294967295 >>",
+            "<< /Type /Page /Parent 4 0 R /MediaBox [0 0 300 300] >>",
+        ];
+        let mut offsets = Vec::new();
+        for (i, o) in objs.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+        for o in offsets {
+            pdf.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+        let doc = lopdf::Document::load_mem(&pdf).unwrap();
+        assert_eq!(doc.page_iter().size_hint().0, 0);
+        assert_eq!(doc.get_pages().len(), 2);
+        let info = inspect(std::sync::Arc::new(pdf), None).unwrap();
+        assert_eq!(info.pages.len(), 2);
+    }
+
+    #[test]
     fn view_and_user_space_round_trip_for_every_rotation() {
         for rotation in [0u16, 90, 180, 270] {
             let (w, h) = if rotation % 180 == 0 { (200.0, 300.0) } else { (300.0, 200.0) };

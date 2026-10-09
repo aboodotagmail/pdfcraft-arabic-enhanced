@@ -6,7 +6,6 @@ use crate::xobject::PdfImage;
 use crate::xref::{Xref, XrefType};
 use crate::{DecompressError, Error, ObjectStream, Result, Stream};
 use log::debug;
-use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::str;
 use std::sync::Arc;
@@ -937,27 +936,11 @@ impl Iterator for PageTreeIter<'_> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let kids = self.kids.unwrap_or(&[]);
-
-        let nb_pages: usize = kids
-            .iter()
-            .chain(self.stack.iter().flat_map(|k| k.iter()))
-            .map(|kid| {
-                if let Ok(dict) = kid.as_reference().and_then(|id| self.doc.get_dictionary(id)) {
-                    if let Ok(b"Pages") = dict.get_type() {
-                        let count = dict.get_deref(b"Count", self.doc).and_then(Object::as_i64).unwrap_or(0);
-                        // Don't let page count go backwards in case of an invalid document.
-                        max(0, count) as usize
-                    } else {
-                        1
-                    }
-                } else {
-                    1
-                }
-            })
-            .sum();
-
-        (nb_pages, Some(nb_pages))
+        // PdfCraft patch: the hint summed the page tree's `/Count` entries, which a file can set
+        // to anything; `get_pages` collects through a Vec sized from it, so `/Count 4294967295`
+        // asked for 51 GB and aborted. Every page yielded spends one of `iter_limit` (the number
+        // of objects), so that bounds the count; the lower bound promises nothing.
+        (0, Some(self.iter_limit))
     }
 }
 
