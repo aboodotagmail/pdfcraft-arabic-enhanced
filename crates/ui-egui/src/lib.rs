@@ -7,6 +7,11 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+/// Who this modified version comes from, in plain text (the ArtCraft marks may not be used by a
+/// modified version; docs/brand/LICENSE-brand.txt allows saying it is based on PdfCraft).
+pub const BASED_ON: &str =
+    "Unofficial modified version, based on PdfCraft by the ArtCraft team. Not affiliated with or endorsed by the ArtCraft Team.";
+
 /// Translate an English UI string into the current language (see [`i18n`]).
 macro_rules! tl {
     ($s:expr) => {
@@ -1686,7 +1691,7 @@ impl eframe::App for PdfCraftApp {
             .and_then(|i| self.session.get(self.views[i].id))
             .map(|d| d.display_name())
             .or_else(|| self.combine_showing().then(|| tl!("Combine files").to_owned()))
-            .map_or_else(|| "PdfCraft".to_owned(), |name| format!("{name} — PdfCraft"));
+            .map_or_else(|| "PdfCraft Arabic".to_owned(), |name| format!("{name} — PdfCraft Arabic"));
         if title != self.window_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.window_title = title;

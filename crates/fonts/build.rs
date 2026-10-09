@@ -27,6 +27,16 @@ fn main() {
     }
 }
 
+/// Font families never embedded, whatever the build input lists: Adobe-designed type, including
+/// Noto CJK, which is Source Han rebranded (AGENTS.md §1.1). craft-fonts 8dcdacd lists Noto Sans
+/// CJK SC; it is skipped here rather than shipped.
+const EXCLUDED_FAMILY_PREFIXES: &[&str] = &["Noto Sans CJK", "Noto Serif CJK", "Source Han", "Source Sans", "Source Serif", "Source Code"];
+
+/// Whether `family` is on the exclusion list ([`EXCLUDED_FAMILY_PREFIXES`]).
+fn excluded(family: &str) -> bool {
+    EXCLUDED_FAMILY_PREFIXES.iter().any(|p| family.starts_with(p))
+}
+
 /// One `CraftFont { .. }` initialiser per manifest line.
 fn craft_fonts(dir: &std::path::Path) -> Result<String, String> {
     let manifest = dir.join("fonts/manifest.txt");
@@ -39,6 +49,10 @@ fn craft_fonts(dir: &std::path::Path) -> Result<String, String> {
         let [family, style, file, scripts, ..] = f.as_slice() else {
             return Err(format!("malformed manifest line: {line}"));
         };
+        if excluded(family) {
+            println!("cargo::warning=craft-fonts: skipping {family} {style} (not allowed in PdfCraft, AGENTS.md §1.1)");
+            continue;
+        }
         // Arabic interface faces are small, so the web build keeps them too.
         let arabic = scripts.split(',').any(|s| s.trim() == "Arab");
         // Telugu faces too, for the Telugu interface.

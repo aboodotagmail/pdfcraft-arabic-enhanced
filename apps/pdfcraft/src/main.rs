@@ -151,7 +151,7 @@ fn main() -> eframe::Result {
     }
     let integrated = cfg!(target_os = "macos");
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("PdfCraft")
+        .with_title("PdfCraft Arabic")
         .with_inner_size([1440.0, 920.0])
         .with_min_inner_size([820.0, 520.0])
         .with_drag_and_drop(true)

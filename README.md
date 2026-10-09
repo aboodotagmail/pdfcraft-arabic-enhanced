@@ -1,49 +1,34 @@
-<p align="center">
-  <a href="https://getartcraft.com/">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/brand/artcraft-logo-white.svg">
-      <img alt="ArtCraft" src="docs/brand/artcraft-logo.svg" width="200">
-    </picture>
-  </a>
-</p>
-
-
-<h1 align="center">PdfCraft</h1>
+<h1 align="center">PdfCraft Arabic</h1>
 
 <p align="center">
-  <b>The PDF workbench; an open-source, clean-room reimplementation of Adobe Acrobat, rebuilt in pure Rust.</b><br>
-  Read, organize, combine, split and secure PDFs in a fast, native app, written in Rust from the ground up.<br>
-  macOS · Windows · Linux · FreeBSD · the web
+  <b>An unofficial, modified version of <a href="https://github.com/storytold/pdfcraft">PdfCraft</a> with full Arabic text support and a Windows installer.</b><br>
+  Arabic you add to a PDF is real text: shaped, right-to-left, embedded as a font subset, searchable and selectable.
 </p>
 
-<p align="center">
-  <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-12a58a">
-  <img alt="Written in Rust" src="https://img.shields.io/badge/written%20in-Rust-0a7563">
-  <img alt="Platforms: macOS, Windows, Linux, FreeBSD, web" src="https://img.shields.io/badge/runs%20on-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux%20%C2%B7%20FreeBSD%20%C2%B7%20web-12a58a">
-  <img alt="No account, no telemetry" src="https://img.shields.io/badge/no%20account-no%20telemetry-0a7563">
-</p>
+> [!IMPORTANT]
+> **PdfCraft Arabic is not PdfCraft and is not made, sponsored or endorsed by the ArtCraft Team.**
+> It is based on [PdfCraft](https://github.com/storytold/pdfcraft) by the ArtCraft team and community
+> (MIT OR Apache-2.0) and carries none of the ArtCraft marks. Report problems with this version
+> [here](https://github.com/aboodotagmail/pdfcraft-arabic-enhanced/issues), not to the upstream project.
 
-<p align="center">
-  <a href="https://discord.gg/artcraft"><img alt="Join the ArtCraft community on Discord" src="https://img.shields.io/badge/Join%20us%20on%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" height="40"></a>
-</p>
+### What this version is adding (work in progress; status in [ROADMAP.md](ROADMAP.md#pdfcraft-arabic))
 
-<p align="center">
-  <a href="https://getartcraft.com/apps/pdfcraft"><b>PdfCraft on getartcraft.com</b></a> ·
-  <a href="https://getartcraft.com/">ArtCraft</a> ·
-  <a href="https://getartcraft.com/apps">All Crafting Apps</a>
-</p>
+- **Arabic text in PDFs** (in progress): joining forms, lam-alef ligatures and diacritics (tashkeel) shaped with
+  the font's own OpenType tables; right-to-left and mixed-direction lines laid out with the Unicode
+  bidirectional algorithm; embedded as a TrueType subset (Type0/CIDFontType2) with a ToUnicode map
+  and ActualText, so copy, search and selection give back the text as typed.
+- **Windows x64 MSI** built by GitHub Actions (`.github/workflows/windows-x64.yml`), installed,
+  launched and uninstalled on every build.
+- Arabic font: [Noto Sans Arabic](https://github.com/notofonts/arabic) (SIL OFL 1.1) from the
+  [craft-fonts](https://github.com/storytold/craft-fonts) build input.
 
-<br>
+The rest of this README describes the PdfCraft features this version keeps.
 
 <p align="center">
   <img src="docs/images/pdfcraft-viewer.png" alt="PdfCraft with the PdfCraft Showcase cover page open, the All tools panel on the left and 20 threaded comments on the right" width="100%">
   <br>
   <sub>The PdfCraft Showcase, a 13-page specimen PDF, open with the All tools panel and threaded comments.</sub>
 </p>
-
-> [!NOTE]
-> **ArtCraft is a community of artists from all walks of life.** Digital, generative, music,
-> games &mdash; if you make things, you're one of us. **[Come say hi on Discord](https://discord.gg/artcraft).**
 
 <p align="center">
   <a href="#highlights">Highlights</a> ·
@@ -58,21 +43,17 @@
   <a href="#how-its-built">How it's built</a> ·
   <a href="#get-started">Get started</a> ·
   <a href="#whats-next">What's next</a> ·
-  <a href="#downloads">Downloads</a> ·
-  <a href="#the-crafting-apps">Crafting Apps</a>
+  <a href="#downloads">Downloads</a>
 </p>
 
 ---
 
 ## Community
 
-PdfCraft is part of [ArtCraft](https://getartcraft.com). Come say hello, get help and follow development:
+- **This version (PdfCraft Arabic):** [github.com/aboodotagmail/pdfcraft-arabic-enhanced](https://github.com/aboodotagmail/pdfcraft-arabic-enhanced) · [issues](https://github.com/aboodotagmail/pdfcraft-arabic-enhanced/issues)
+- **The original project:** [github.com/storytold/pdfcraft](https://github.com/storytold/pdfcraft)
 
-- **Discord: [discord.gg/artcraft](https://discord.gg/artcraft)**. This is the fastest way to get help and share feedback. The app has a Discord button in its title bar.
-- **Web page:** [getartcraft.com/apps/pdfcraft](https://getartcraft.com/apps/pdfcraft)
-- **Source:** [github.com/storytold/pdfcraft](https://github.com/storytold/pdfcraft)
-
-The ArtCraft name and logos in `docs/brand/` are trademarks of the ArtCraft Team and are not open source. They may be used only unmodified, and only as part of PdfCraft (see `docs/brand/LICENSE-brand.txt`). Forks and modified versions must remove them.
+The ArtCraft name and logos in `docs/brand/` are trademarks of the ArtCraft Team and are not open source. They are kept in this repository only as part of the copied history and are not used in PdfCraft Arabic's application or installers (see `docs/brand/LICENSE-brand.txt`).
 
 ## Highlights
 
@@ -406,9 +387,11 @@ The honest assessment by area, what's lacking and where we're going are in **[RO
 
 ## Downloads
 
-**New to PdfCraft?** Download it from the [PdfCraft page on getartcraft.com](https://getartcraft.com/apps/pdfcraft). That's the easiest way to install it.
-
-**Want a specific build or format?** On GitHub, the [latest release](https://github.com/storytold/pdfcraft/releases/latest) has every build listed below, and [all releases](https://github.com/storytold/pdfcraft/releases) has earlier versions and their notes. `<ver>` in the file names is the version number, and `SHA256SUMS.txt` lists a checksum for every file.
+Windows x64 builds of PdfCraft Arabic (an MSI installer and a portable zip) are produced by the
+**Windows x64 MSI** workflow in this repository's GitHub Actions: open the latest successful run and
+download the `pdfcraft-arabic-windows-x64` artifact. Builds are unsigned until a code-signing
+certificate is configured, so Windows SmartScreen may ask for confirmation. The tables below
+describe the original PdfCraft release formats.
 
 ### Windows
 
@@ -464,66 +447,20 @@ Use the MSI for your architecture. Per-user installation overrides are not suppo
 
 ---
 
-## The Crafting Apps
-
-PdfCraft is one of the **Crafting Apps**: free, open-source creative tools from the
-[ArtCraft](https://getartcraft.com/) team, each written from scratch in Rust and each able to
-stand on its own.
-
-| | App | What it's for | Code | Learn more |
-|:-:|---|---|---|---|
-| <img src="https://raw.githubusercontent.com/storytold/photocraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.photocraft.png" alt="" width="32" height="32"> | **PhotoCraft** | Image editing: layers, masks, type and real PSD files | [GitHub](https://github.com/storytold/photocraft) | [Website](https://getartcraft.com/apps/photocraft) |
-| <img src="https://raw.githubusercontent.com/storytold/vectorcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.vectorcraft.png" alt="" width="32" height="32"> | **VectorCraft** | Vector illustration | [GitHub](https://github.com/storytold/vectorcraft) | [Website](https://getartcraft.com/apps/vectorcraft) |
-| <img src="https://raw.githubusercontent.com/storytold/filmcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.filmcraft.png" alt="" width="32" height="32"> | **FilmCraft** | Video editing, color and sound | [GitHub](https://github.com/storytold/filmcraft) | [Website](https://getartcraft.com/apps/filmcraft) |
-| <img src="https://raw.githubusercontent.com/storytold/lightcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.lightcraft.png" alt="" width="32" height="32"> | **LightCraft** | Photo library and raw development | [GitHub](https://github.com/storytold/lightcraft) | [Website](https://getartcraft.com/apps/lightcraft) |
-| <img src="https://raw.githubusercontent.com/storytold/pdfcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.pdfcraft.png" alt="" width="32" height="32"> | **PdfCraft** | **Reading, organizing and protecting PDFs · you are here** | [GitHub](https://github.com/storytold/pdfcraft) | [Website](https://getartcraft.com/apps/pdfcraft) |
-| <img src="https://raw.githubusercontent.com/storytold/effectcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.effectcraft.png" alt="" width="32" height="32"> | **EffectCraft** | Motion graphics and visual effects | [GitHub](https://github.com/storytold/effectcraft) | [Website](https://getartcraft.com/apps/effectcraft) |
-| <img src="https://raw.githubusercontent.com/storytold/designcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.designcraft.png" alt="" width="32" height="32"> | **DesignCraft** | Page layout and publishing | [GitHub](https://github.com/storytold/designcraft) | [Website](https://getartcraft.com/apps/designcraft) |
-
-And [**ArtCraft**](https://getartcraft.com/) itself, our AI image and video studio for artists who want real control.
-
-<br>
-
-<p align="center">
-  <a href="https://discord.gg/artcraft"><img alt="Join the ArtCraft community on Discord" src="https://img.shields.io/badge/Join%20us%20on%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" height="40"></a>
-</p>
-
-<h3 align="center">Come make things with us</h3>
-
-<p align="center">
-  Our Discord is where artists of every kind hang out: people who paint, shoot, draw, cut film,
-  set type, and people still figuring out what they like to make. Share what you're working on,
-  ask for help, tell us what's broken, or tell us what you wish these tools could do.
-  Whatever your medium and however long you've been at it, you're welcome here.
-</p>
-
-<p align="center">
-  <a href="https://discord.gg/artcraft"><b>discord.gg/artcraft</b></a> ·
-  <a href="https://getartcraft.com/">getartcraft.com</a> ·
-  <a href="https://getartcraft.com/apps">The Crafting Apps</a> ·
-  <a href="https://getartcraft.com/apps/pdfcraft">PdfCraft</a>
-</p>
-
----
-
 ## License and credits
 
-PdfCraft is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
-Copyright (c) 2026 ArtCraft Team and the PdfCraft contributors. Required notices are in [NOTICE](NOTICE).
+PdfCraft Arabic, like PdfCraft, is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE),
+at your option. PdfCraft is Copyright (c) 2026 ArtCraft Team and the PdfCraft contributors; the
+modifications are Copyright (c) 2026 the PdfCraft Arabic contributors. Required notices are in [NOTICE](NOTICE).
 
 Bundled fonts, icons, images and other assets keep their own open licenses; each one is listed
 with its author, source and license in [ATTRIBUTION.md](ATTRIBUTION.md). Release builds also embed
-the Japanese fonts of [craft-fonts](https://github.com/storytold/craft-fonts/blob/main/ATTRIBUTION.md)
+the Japanese fonts and Noto Sans Arabic of [craft-fonts](https://github.com/storytold/craft-fonts/blob/main/ATTRIBUTION.md)
 (SIL Open Font License 1.1).
 
 The ArtCraft name, wordmark and logos in [`docs/brand/`](docs/brand/) are trademarks of the
 ArtCraft Team and are not covered by this license. They may be used only unmodified, and only as
 part of this repository and PdfCraft, under [`docs/brand/LICENSE-brand.txt`](docs/brand/LICENSE-brand.txt).
-Forks and modified versions must remove them.
+PdfCraft Arabic, a modified version, does not use them.
 
-<sub>Adobe, Photoshop, Illustrator, Premiere Pro, Lightroom, Acrobat, After Effects and InDesign are trademarks or registered trademarks of Adobe Inc. in the United States and/or other countries. PdfCraft is an independent, open-source project and is not affiliated with, sponsored by or endorsed by Adobe Inc.; these names are used only to describe the workflows it is compatible with.</sub>
-
-<p align="center">
-  <a href="https://getartcraft.com/"><img alt="ArtCraft" src="docs/brand/artcraft-mark.svg" width="28"></a><br>
-  <sub>Made by the <a href="https://getartcraft.com/">ArtCraft</a> team and community.</sub>
-</p>
+<sub>Adobe, Photoshop, Illustrator, Premiere Pro, Lightroom, Acrobat, After Effects and InDesign are trademarks or registered trademarks of Adobe Inc. in the United States and/or other countries. PdfCraft and PdfCraft Arabic are independent, open-source projects and are not affiliated with, sponsored by or endorsed by Adobe Inc.; these names are used only to describe the workflows it is compatible with.</sub>

@@ -110,9 +110,10 @@ fn stdout_line(line: std::fmt::Arguments<'_>) -> Result<(), CliError> {
 
 fn version() -> Result<(), CliError> {
     stdout_line(format_args!("pdfcraft-cli {}", env!("CARGO_PKG_VERSION")))?;
-    stdout_line(format_args!("Discord: {}  (help and feedback)", pdfcraft_engine::links::DISCORD))?;
-    stdout_line(format_args!("Web:     {}", pdfcraft_engine::links::APP_PAGE))?;
-    stdout_line(format_args!("Source:  {}", pdfcraft_engine::links::GITHUB))?;
+    stdout_line(format_args!("PdfCraft Arabic, an unofficial modified version of PdfCraft"))?;
+    stdout_line(format_args!("Source:   {}", pdfcraft_engine::links::GITHUB))?;
+    stdout_line(format_args!("Issues:   {}", pdfcraft_engine::links::ISSUES))?;
+    stdout_line(format_args!("Based on: {}", pdfcraft_engine::links::UPSTREAM))?;
     Ok(())
 }
 

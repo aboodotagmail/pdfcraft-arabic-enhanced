@@ -113,7 +113,7 @@ impl McpServer {
                 Ok(json!({
                     "protocolVersion": version,
                     "capabilities": { "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false } },
-                    "serverInfo": { "name": "pdfcraft", "title": "PdfCraft", "version": env!("CARGO_PKG_VERSION"), "websiteUrl": pdfcraft_engine::links::APP_PAGE },
+                    "serverInfo": { "name": "pdfcraft", "title": "PdfCraft", "version": env!("CARGO_PKG_VERSION"), "websiteUrl": pdfcraft_engine::links::GITHUB },
                     "instructions": if self.compact { format!("{INSTRUCTIONS}{COMPACT_INSTRUCTIONS}") } else { INSTRUCTIONS.to_string() },
                 }))
             }

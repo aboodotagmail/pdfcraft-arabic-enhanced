@@ -1,0 +1,109 @@
+# PdfCraft Arabic for Windows x64: test, build the MSI (unsigned unless signing secrets are set),
+# then install it, launch the installed app and CLI, uninstall it and check nothing is left.
+# The MSI and portable zip are uploaded as workflow artifacts only; no GitHub Release is published.
+#
+# Built at milestones, not on every push: run it from the Actions tab (workflow_dispatch), or push a
+# commit whose message contains [build-msi].
+name: Windows x64 MSI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  workflow_dispatch:
+
+concurrency:
+  group: windows-x64-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: test and package (x64)
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[build-msi]')
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      # The craft-fonts build input: Japanese fonts and Noto Sans Arabic (Noto Sans CJK SC in the
+      # same revision is skipped by crates/fonts/build.rs, AGENTS.md §1.1). Bump deliberately.
+      - name: Check out craft-fonts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: storytold/craft-fonts
+          ref: 8dcdacd5153e64560d109541a47d806f26f048c0
+          path: craft-fonts
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-x64-msi
+
+      - name: Test (with craft-fonts)
+        env:
+          CRAFT_FONTS_DIR: ${{ github.workspace }}\craft-fonts
+          CRAFT_FONTS_REQUIRED: "1"
+        run: cargo test --workspace --locked
+
+      - name: Install WiX
+        shell: pwsh
+        run: dotnet tool install --global wix --version 5.0.2
+
+      # Signs only when WINDOWS_CERTIFICATE/WINDOWS_CERTIFICATE_PASSWORD or the AZURE_* Trusted
+      # Signing secrets exist; otherwise sign.ps1 warns and the MSI is unsigned.
+      - name: Build and package
+        shell: pwsh
+        env:
+          CRAFT_FONTS_DIR: ${{ github.workspace }}\craft-fonts
+          CRAFT_FONTS_REQUIRED: "1"
+          DIST: ${{ github.workspace }}\dist\release
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
+        run: ./packaging/windows/package.ps1 -Arch x64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pdfcraft-arabic-windows-x64
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 30
+
+  install:
+    name: install, launch and uninstall (x64)
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: packaging/windows
+      - uses: actions/download-artifact@v4
+        with:
+          name: pdfcraft-arabic-windows-x64
+          path: dist
+      - name: Install, check, launch, uninstall
+        shell: pwsh
+        run: ./packaging/windows/smoke-msi.ps1 -Msi (Get-ChildItem dist/*.msi | Select-Object -First 1).FullName
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pdfcraft-arabic-windows-x64-smoke
+          path: smoke/*
+          if-no-files-found: ignore
+          retention-days: 14

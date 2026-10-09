@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-  Build, sign and package PdfCraft for Windows.
+  Build, sign and package PdfCraft Arabic for Windows.
 
 .DESCRIPTION
   Produces, in $env:DIST (default: dist/release):
-    pdfcraft-<version>-windows-<arch>.msi            per-machine installer (WiX v5)
-    pdfcraft-<version>-windows-<arch>-portable.zip   pdfcraft.exe + pdfcraft-cli.exe + portable.txt
+    pdfcraft-arabic-<version>-windows-<arch>.msi           per-machine installer (WiX v5)
+    pdfcraft-arabic-<version>-windows-<arch>-portable.zip  pdfcraft.exe + pdfcraft-cli.exe + portable.txt
 
   The binaries link the C runtime statically (+crt-static), so neither the MSI nor the portable
   zip needs the Visual C++ redistributable. Signing is delegated to sign.ps1 (skipped with a
@@ -53,7 +53,7 @@ New-Item -ItemType Directory -Force -Path $Dist | Out-Null
 if (-not $env:PDFCRAFT_BUILD_SHA) { $env:PDFCRAFT_BUILD_SHA = (git -C $Root rev-parse HEAD 2>$null) }
 if (-not $env:PDFCRAFT_BUILD_DATE) { $env:PDFCRAFT_BUILD_DATE = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd') }
 
-Write-Output "PdfCraft $Version for Windows $Arch ($Target)"
+Write-Output "PdfCraft Arabic $Version for Windows $Arch ($Target)"
 
 if (-not $SkipBuild) {
   # Static CRT: no VC++ redistributable needed. Scoped to the target so host build scripts and
@@ -90,8 +90,30 @@ Copy-Item (Join-Path $Bin 'pdfcraft.exe'), (Join-Path $Bin 'pdfcraft-cli.exe') $
 
 & (Join-Path $PSScriptRoot 'sign.ps1') (Join-Path $Stage 'pdfcraft.exe') (Join-Path $Stage 'pdfcraft-cli.exe')
 
+# Licence texts installed beside the program (MIT/Apache-2.0 notices, NOTICE, and the OFL texts of
+# the craft-fonts faces this build embeds). Fixed file names, so pdfcraft.wxs can list them.
+$Licenses = Join-Path $Stage 'licenses'
+New-Item -ItemType Directory -Force -Path $Licenses | Out-Null
+Copy-Item (Join-Path $Root 'LICENSE-MIT') (Join-Path $Licenses 'LICENSE-MIT.txt')
+Copy-Item (Join-Path $Root 'LICENSE-APACHE') (Join-Path $Licenses 'LICENSE-APACHE.txt')
+Copy-Item (Join-Path $Root 'NOTICE') (Join-Path $Licenses 'NOTICE.txt')
+$FontLicenses = [System.Text.StringBuilder]::new("Licences of the fonts embedded in this build of PdfCraft Arabic.`r`n")
+if ($env:CRAFT_FONTS_DIR) {
+  Get-ChildItem -Path (Join-Path $env:CRAFT_FONTS_DIR 'fonts') -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -notlike 'noto-sans-cjk*' -and $_.Name -notlike 'source-han*' } | ForEach-Object {
+      $ofl = Join-Path $_.FullName 'OFL.txt'
+      if (Test-Path $ofl) { [void]$FontLicenses.Append("`r`n==== $($_.Name) ====`r`n").Append((Get-Content -Raw $ofl)) }
+    }
+} else {
+  [void]$FontLicenses.Append("`r`nThis build was made without craft-fonts and embeds no extra fonts.`r`n")
+}
+foreach ($f in Get-ChildItem (Join-Path $Root 'assets\fonts') -Filter 'OFL-*.txt') {
+  [void]$FontLicenses.Append("`r`n==== $($f.BaseName) (interface font) ====`r`n").Append((Get-Content -Raw $f.FullName))
+}
+[System.IO.File]::WriteAllText((Join-Path $Licenses 'FONT-LICENSES.txt'), $FontLicenses.ToString())
+
 # ---- MSI ---------------------------------------------------------------------------------------
-$Msi = Join-Path $Dist "pdfcraft-$Version-windows-$Arch.msi"
+$Msi = Join-Path $Dist "pdfcraft-arabic-$Version-windows-$Arch.msi"
 Invoke-Native 'wix build' {
   wix build (Join-Path $PSScriptRoot 'pdfcraft.wxs') -arch $Arch `
     (Join-Path $PSScriptRoot 'installer-ui.wxs') `
@@ -106,27 +128,28 @@ Remove-Item -Force -ErrorAction SilentlyContinue ([IO.Path]::ChangeExtension($Ms
 & (Join-Path $PSScriptRoot 'sign.ps1') $Msi
 
 # ---- portable zip ------------------------------------------------------------------------------
-$Portable = Join-Path $TargetDir "windows-package\pdfcraft-$Version-windows-$Arch-portable"
+$Portable = Join-Path $TargetDir "windows-package\pdfcraft-arabic-$Version-windows-$Arch-portable"
 Remove-Item -Recurse -Force $Portable -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Portable | Out-Null
 Copy-Item (Join-Path $Stage '*.exe') $Portable
-foreach ($f in 'README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE') {
+foreach ($f in 'README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE') {
   $p = Join-Path $Root $f
   if (Test-Path $p) { Copy-Item $p $Portable }
 }
 # Builds made with craft-fonts (CRAFT_FONTS_DIR, set for every release) embed its fonts: ship their
 # licences, fonts\<family>\OFL.txt -> OFL-<family>.txt.
 if ($env:CRAFT_FONTS_DIR) {
-  Get-ChildItem -Path (Join-Path $env:CRAFT_FONTS_DIR 'fonts') -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-    $ofl = Join-Path $_.FullName 'OFL.txt'
-    if (Test-Path $ofl) { Copy-Item $ofl (Join-Path $Portable "OFL-$($_.Name).txt") }
-  }
+  Get-ChildItem -Path (Join-Path $env:CRAFT_FONTS_DIR 'fonts') -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -notlike 'noto-sans-cjk*' -and $_.Name -notlike 'source-han*' } | ForEach-Object {
+      $ofl = Join-Path $_.FullName 'OFL.txt'
+      if (Test-Path $ofl) { Copy-Item $ofl (Join-Path $Portable "OFL-$($_.Name).txt") }
+    }
 }
 # portable.txt beside pdfcraft.exe switches on portable mode: settings, logs, recovery files and new
 # digital IDs go to PdfCraftData\ next to the exe instead of %APPDATA% (#157; see
 # crates/ui-egui/src/portable.rs).
 Copy-Item (Join-Path $PSScriptRoot 'portable.txt') $Portable
-$Zip = Join-Path $Dist "pdfcraft-$Version-windows-$Arch-portable.zip"
+$Zip = Join-Path $Dist "pdfcraft-arabic-$Version-windows-$Arch-portable.zip"
 Remove-Item -Force $Zip -ErrorAction SilentlyContinue
 Compress-Archive -Path $Portable -DestinationPath $Zip
 

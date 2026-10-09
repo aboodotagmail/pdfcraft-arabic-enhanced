@@ -8,6 +8,27 @@ Detailed task lists and acceptance tests are in `plan/execution-plan.md` (local-
 
 **What "parity" means here:** the offline feature set of Acrobat Pro, milestones M0–M14. It excludes Adobe's cloud services (Document Cloud storage, Adobe Sign, the Adobe AI Assistant). Those have no clean-room equivalent; PdfCraft's alternatives are local-first, plus opt-in providers (M13).
 
+## PdfCraft Arabic
+
+This repository is PdfCraft Arabic, an unofficial modified version of PdfCraft focused on Arabic
+text and a Windows installer. Its phases run before the upstream milestones below; each phase ends
+with a green, pushed commit on the working branch.
+
+| Phase | Scope | Status |
+|---|---|---|
+| 0 | Fork identity (no ArtCraft marks), own MSI identity, licence texts in the MSI, craft-fonts pin with Noto Sans Arabic (Noto CJK excluded), Windows x64 MSI workflow with install/launch/uninstall smoke test | done |
+| 1 | Shaping (harfrust) and paragraph bidi layout in `pdfcraft-fonts` | planned |
+| 2 | Embedded TrueType subset (Type0/CIDFontType2, Identity-H), ToUnicode, ActualText | planned |
+| 3 | Arabic in every place text is created (Add text, comments, forms, stamps, Create PDF) | planned |
+| 4 | Extraction, search and selection of Arabic (bidi order, presentation forms, Arabic-aware matching) | planned |
+| 5 | Editing existing Arabic text without corrupting it | planned |
+| 6 | Right-to-left export (HTML, Word, RTF) | planned |
+| 7 | Arabic interface | planned |
+| 8 | Reviewed upstream improvements | planned |
+
+Log:
+- **2026-10-09 (Phase 0):** Fork identity: the ArtCraft logos, Discord and website links are gone from the app (About, home, top bar, Help menu, CLI), replaced by this repository's links and a plain-text "based on PdfCraft" line; the update check asks this repository. The MSI has its own name, publisher, UpgradeCode, component GUIDs, ProgID and context-menu verb, so it never replaces or collides with an upstream install, and it installs the licence texts (MIT, Apache-2.0, NOTICE, font OFL). craft-fonts is pinned to 8dcdacd for Noto Sans Arabic; `crates/fonts/build.rs` skips Noto CJK/Source Han faces (AGENTS.md §1.1). New workflow `windows-x64.yml` tests, packages, installs, launches (control-channel screenshot) and uninstalls the MSI.
+
 ## Estimate summary
 
 The unit is **wall-clock hours of agent work** (Claude Opus 5.5 coding continuously; human review time not included).

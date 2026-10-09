@@ -1,11 +1,21 @@
-PdfCraft
+PdfCraft Arabic
+Copyright (c) 2026 the PdfCraft Arabic contributors (modifications).
+
+PdfCraft Arabic is an unofficial, modified version of PdfCraft
+(https://github.com/storytold/pdfcraft). It adds Arabic text support (shaping, right-to-left
+layout, embedded fonts, search) and Windows packaging under its own name. It is not made,
+sponsored or endorsed by the ArtCraft Team, and it carries none of the ArtCraft marks.
+Files changed from the original are recorded in this repository's git history.
+
+Based on PdfCraft
 Copyright (c) 2026 ArtCraft Team and the PdfCraft contributors.
 Licensed under the MIT License or the Apache License, Version 2.0, at your option
-(LICENSE-MIT, LICENSE-APACHE).
+(LICENSE-MIT, LICENSE-APACHE). The modifications are under the same licences.
 
 The ArtCraft name, wordmark and logos in docs/brand/ are trademarks of the ArtCraft Team. They are
 not open source and are not covered by the license above; their terms are in
-docs/brand/LICENSE-brand.txt.
+docs/brand/LICENSE-brand.txt. They remain in docs/brand/ only as part of the copied repository
+and are not used in PdfCraft Arabic's application or installers.
 
 Third-party material
 

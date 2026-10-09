@@ -1,5 +1,6 @@
-//! Community links: the Discord button is one click away everywhere; Help menu, About dialog and
-//! home screen open the ArtCraft and PdfCraft pages.
+//! Project links: the Help menu, About dialog and home screen open this fork's pages and name the
+//! upstream project in plain text. A modified version carries no ArtCraft marks or links
+//! (docs/brand/LICENSE-brand.txt, "Forks and modified versions").
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
@@ -17,24 +18,14 @@ fn harness(setup: impl FnOnce(&mut PdfCraftApp) + 'static) -> Harness<'static, P
 }
 
 #[test]
-fn discord_button_in_the_top_bar_opens_discord() {
-    let mut h = harness(|_| {});
-    h.get_by_label("Discord").click();
-    h.run_steps(2);
-    assert_eq!(h.state().last_opened_url.as_deref(), Some(links::DISCORD));
-    assert_eq!(links::DISCORD, "https://discord.gg/artcraft");
-}
-
-#[test]
 fn home_screen_links() {
     for (label, url) in [
-        ("Join our Discord", links::DISCORD),
-        ("PdfCraft web page", "https://getartcraft.com/apps/pdfcraft"),
-        ("PdfCraft on GitHub", "https://github.com/storytold/pdfcraft"),
-        ("ArtCraft website", "https://getartcraft.com"),
+        ("PdfCraft Arabic on GitHub", "https://github.com/aboodotagmail/pdfcraft-arabic-enhanced"),
+        ("Report a problem", "https://github.com/aboodotagmail/pdfcraft-arabic-enhanced/issues"),
+        ("Original PdfCraft project", "https://github.com/storytold/pdfcraft"),
     ] {
         let mut h = harness(|_| {});
-        h.get_by_label("Join the ArtCraft community");
+        h.get_by_label(pdfcraft_ui_egui::BASED_ON);
         h.get_by_label(label).click();
         h.run_steps(2);
         assert_eq!(h.state().last_opened_url.as_deref(), Some(url), "{label}");
@@ -42,17 +33,27 @@ fn home_screen_links() {
 }
 
 #[test]
-fn about_dialog_shows_the_brand_and_links() {
+fn no_artcraft_marks_or_discord_in_the_interface() {
+    let mut h = harness(|app| app.dialog = Some(Dialog::About));
+    assert_eq!(h.query_all_by_label("ArtCraft").count(), 0, "no ArtCraft logo (alt text)");
+    assert_eq!(h.query_all_by_label("Discord").count(), 0);
+    assert_eq!(h.query_all_by_label("Join our Discord").count(), 0);
+    h.run_steps(1);
+}
+
+#[test]
+fn about_dialog_names_the_fork_and_links() {
     let pdf = b"%PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF";
     // With a document open, so the home screen's own links are not on screen.
     let mut h = harness(move |app| {
         app.open_bytes("one.pdf", None, pdf.to_vec()).unwrap();
         app.dialog = Some(Dialog::About);
     });
-    assert!(h.query_all_by_label("ArtCraft").count() >= 2, "the mark and the wordmark (alt text)");
-    h.get_by_label("Join our Discord").click();
+    h.get_by_label("PdfCraft Arabic");
+    h.get_by_label(pdfcraft_ui_egui::BASED_ON);
+    h.get_by_label("PdfCraft Arabic on GitHub").click();
     h.run_steps(2);
-    assert_eq!(h.state().last_opened_url.as_deref(), Some(links::DISCORD));
+    assert_eq!(h.state().last_opened_url.as_deref(), Some(links::GITHUB));
 }
 
 #[test]
