@@ -282,16 +282,15 @@ pub(crate) fn editor(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, ad
         let [cr, cg, cb] = t.style.color.map(|v| (v.clamp(0.0, 1.0) * 255.0) as u8);
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            let resp = ui.add(
-                egui::TextEdit::multiline(&mut t.text)
-                    .font(egui::FontId::proportional((t.style.size as f32 * zoom).max(8.0)))
-                    .desired_width(r.width().max(60.0))
+            let id = ui.make_persistent_id("added-text-edit");
+            let font = egui::FontId::proportional((t.style.size as f32 * zoom).max(8.0));
+            let resp = crate::bidi_field::field(ui, &mut t.text, id, true, Some(font), |e| {
+                e.desired_width(r.width().max(60.0))
                     .desired_rows(1)
                     .background_color(Color32::from_rgba_unmultiplied(255, 255, 255, 235))
                     .text_color(Color32::from_rgb(cr, cg, cb))
                     .hint_text(tl!("Type text"))
-                    .id_salt("added-text-edit"),
-            );
+            });
             if t.focus {
                 resp.request_focus();
                 t.focus = false;
@@ -387,7 +386,11 @@ pub(crate) fn format_panel(ui: &mut egui::Ui, t: &Tokens, style: &AddedText) -> 
     if let Some(picked) = crate::comments::swatch_grid(ui, Some(c)) {
         s.color = picked;
     }
-    ui.label(egui::RichText::new(tl!("Standard fonts; text outside Windows-1252 isn't supported yet.")).small().color(t.text_faint));
+    ui.label(
+        egui::RichText::new(tl!("Standard fonts; Arabic is embedded in Noto Sans Arabic. Other text outside Windows-1252 isn't supported yet."))
+            .small()
+            .color(t.text_faint),
+    );
     (s != *style).then_some(s)
 }
 

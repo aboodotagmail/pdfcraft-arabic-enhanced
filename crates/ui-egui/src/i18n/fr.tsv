@@ -667,7 +667,7 @@
 	Centre	Centrer
 	Align right	Aligner à droite
 	Justify	Justifier
-	Standard fonts; text outside Windows-1252 isn't supported yet.	Polices standard ; le texte hors Windows-1252 n'est pas encore pris en charge.
+	Standard fonts; Arabic is embedded in Noto Sans Arabic. Other text outside Windows-1252 isn't supported yet.	Polices standard ; l'arabe est incorporé en Noto Sans Arabic. Les autres textes hors Windows-1252 ne sont pas encore pris en charge.
 	Edit image	Modifier l'image
 	Rotate counterclockwise	Pivoter vers la gauche
 	Rotate clockwise	Pivoter vers la droite

@@ -469,15 +469,9 @@ pub(crate) fn overlay(ctx: &egui::Context, view: &mut DocView, info: &DocInfo) -
             }
             egui::Frame::NONE.fill(Color32::WHITE).stroke(Stroke::new(1.5, ACCENT)).inner_margin(egui::Margin::symmetric(2, 0)).show(ui, |ui| {
                 let rows = ed.text.lines().count().max(1);
-                let r = ui.add(
-                    egui::TextEdit::multiline(&mut ed.text)
-                        .id(egui::Id::new("edit-text-line-input"))
-                        .font(font.clone())
-                        .text_color(text_color)
-                        .frame(egui::Frame::NONE)
-                        .desired_width(width)
-                        .desired_rows(rows),
-                );
+                let r = crate::bidi_field::field(ui, &mut ed.text, egui::Id::new("edit-text-line-input"), true, Some(font.clone()), |e| {
+                    e.text_color(text_color).frame(egui::Frame::NONE).desired_width(width).desired_rows(rows)
+                });
                 if ed.focus {
                     r.request_focus();
                     ed.focus = false;

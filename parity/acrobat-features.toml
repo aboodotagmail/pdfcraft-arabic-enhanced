@@ -9951,7 +9951,7 @@ status = "planned"
 commands = []
 tools = []
 evidence = []
-notes = "Only a first step exists: Arabic and Hebrew file names and paths in the tab strip, the recent-files list and Properties have glyphs (a craft-fonts Arab face, or an installed font on desktop) and are shown in display order (crates/ui-egui/src/bidi.rs). Missing: multi-line text (bookmarks, comments, search results), text input, a mirrored layout and a right-to-left interface language."
+notes = "Only a first step exists: Arabic and Hebrew file names and paths in the tab strip, the recent-files list and Properties have glyphs (a craft-fonts Arab face, or an installed font on desktop) and are shown in display order (crates/ui-egui/src/bidi.rs). Text input now works for right-to-left text (crates/ui-egui/src/bidi_field.rs): search and find, Add text, Edit text, comments (composer, edits, replies, search, author/subject), form fields and Fill & Sign text lay each paragraph out by UAX #9 in its own direction, with caret, clicks, drag selection and arrow keys following the screen. PdfCraft Arabic keeps the interface English and left to right by design. Still missing: multi-line display text (bookmarks, comments list, search results), a mirrored layout and a right-to-left interface language."
 
 [[feature]]
 id = "misc.installers"

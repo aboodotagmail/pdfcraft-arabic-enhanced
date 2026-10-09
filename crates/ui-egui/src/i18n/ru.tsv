@@ -685,7 +685,7 @@
 	Centre	По центру
 	Align right	Выровнять вправо
 	Justify	По ширине
-	Standard fonts; text outside Windows-1252 isn't supported yet.	Стандартные шрифты; текст вне Windows-1252 пока не поддерживается.
+	Standard fonts; Arabic is embedded in Noto Sans Arabic. Other text outside Windows-1252 isn't supported yet.	Стандартные шрифты; арабский текст встраивается шрифтом Noto Sans Arabic. Другой текст вне Windows-1252 пока не поддерживается.
 	Edit image	Редактировать изображение
 	Rotate counterclockwise	Повернуть против часовой стрелки
 	Rotate clockwise	Повернуть по часовой стрелке

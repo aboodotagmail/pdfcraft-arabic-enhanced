@@ -15,11 +15,10 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, view: &mut DocView, pages: us
     let Some(find) = view.find.as_mut() else { return };
     find.in_panel = true;
     let l = ui.label(egui::RichText::new(tl!("What word or phrase would you like to search for?")).color(t.text_muted));
-    let r = ui
-        .add(
-            egui::TextEdit::singleline(&mut find.query).id(egui::Id::new("search-panel-input")).hint_text(tl!("Search")).desired_width(f32::INFINITY),
-        )
-        .labelled_by(l.id);
+    let r = crate::bidi_field::field(ui, &mut find.query, egui::Id::new("search-panel-input"), false, None, |e| {
+        e.hint_text(tl!("Search")).desired_width(f32::INFINITY)
+    })
+    .labelled_by(l.id);
     if find.focus {
         r.request_focus();
         find.focus = false;

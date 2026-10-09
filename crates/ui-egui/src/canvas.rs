@@ -2217,12 +2217,9 @@ fn find_bar(view: &mut DocView, pages: usize, area: Rect, ui: &mut egui::Ui, t: 
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.add(icons::image("search", 16.0, t.text_muted));
-                        let edit = egui::TextEdit::singleline(&mut find.query)
-                            .id(egui::Id::new("find-input"))
-                            .hint_text(tl!("Find text"))
-                            .desired_width(220.0)
-                            .frame(egui::Frame::NONE);
-                        let r = ui.add(edit);
+                        let r = crate::bidi_field::field(ui, &mut find.query, egui::Id::new("find-input"), false, None, |e| {
+                            e.hint_text(tl!("Find text")).desired_width(220.0).frame(egui::Frame::NONE)
+                        });
                         if find.focus {
                             r.request_focus();
                             find.focus = false;

@@ -154,3 +154,34 @@ fn typing_moving_styling_and_deleting_added_content() {
     let pdfcraft_engine::AddedContent::Image(img) = &added(&h)[0].content else { panic!() };
     assert!(img.flip_h);
 }
+
+#[test]
+fn arabic_typed_into_add_text_moves_the_caret_on_screen() {
+    if pdfcraft_fonts::CRAFT_FONTS.is_empty() {
+        eprintln!("skipping: built without craft-fonts (set CRAFT_FONTS_DIR)");
+        return;
+    }
+    let mut h = harness();
+    assert!(h.state_mut().execute("edit.text"));
+    h.run_steps(2);
+    let p = at(&h, 40.0, 100.0);
+    click(&mut h, p);
+    for c in "سلام".chars() {
+        h.event(egui::Event::Text(c.to_string()));
+        h.run_steps(1);
+    }
+    h.run_steps(2);
+    // The caret is at the end of the word, its left end on screen. The right arrow moves it one
+    // letter to the right: back over م in typing order.
+    h.key_press(egui::Key::ArrowRight);
+    h.run_steps(2);
+    h.event(egui::Event::Text("X".into()));
+    h.run_steps(2);
+    let draft = h.state().views[0].content.draft.as_ref().map(|d| d.text.clone());
+    assert_eq!(draft.as_deref(), Some("سلاXم"));
+    if let Ok(dir) = std::env::var("BIDI_SHOT_DIR")
+        && let Ok(img) = h.render()
+    {
+        let _ = img.save(std::path::Path::new(&dir).join("add-text.png"));
+    }
+}

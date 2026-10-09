@@ -1085,8 +1085,8 @@ pub(crate) fn composer(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, 
                 ComposerKind::Replace => tl!("Replacement text"),
                 _ => tl!("Add a comment"),
             };
-            let edit =
-                ui.add(egui::TextEdit::multiline(&mut c.text).hint_text(hint).desired_rows(3).desired_width(f32::INFINITY).id_salt("composer-text"));
+            let id = ui.make_persistent_id("composer-text");
+            let edit = crate::bidi_field::field(ui, &mut c.text, id, true, None, |e| e.hint_text(hint).desired_rows(3).desired_width(f32::INFINITY));
             if c.focus {
                 edit.request_focus();
                 c.focus = false;

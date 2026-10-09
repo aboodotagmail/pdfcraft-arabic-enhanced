@@ -67,6 +67,7 @@ pub use optimize_ui::{OptimizeDraft, OptimizeTab};
 pub use sign_ui::{DigitalIdEntry, SignDraft, SignStep};
 mod autoscroll;
 mod bidi;
+mod bidi_field;
 mod dialogs;
 mod edit_text_ui;
 mod editing;

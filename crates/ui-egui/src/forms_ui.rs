@@ -291,22 +291,41 @@ pub(crate) fn overlay(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, f
             egui::Area::new(egui::Id::new(("form-editor", view.id.0))).order(egui::Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
                 ui.set_min_size(rect.size());
                 let Some(fx) = view.forms.focus.as_mut() else { return };
-                let mut te = if multiline { egui::TextEdit::multiline(&mut fx.text) } else { egui::TextEdit::singleline(&mut fx.text) };
-                te = te
-                    .desired_width(rect.width() - 6.0)
-                    .font(egui::FontId::proportional(font))
-                    .background_color(Color32::from_rgb(0xFF, 0xFF, 0xF4))
-                    .text_color(Color32::BLACK)
-                    .margin(egui::Margin::symmetric(3, 1))
-                    .password(f.has(field_flags::PASSWORD))
-                    .id(egui::Id::new(("form-field", view.id.0, &f.name, focus.widget)));
-                if let Some(max) = f.max_len {
-                    te = te.char_limit(max);
+                let password = f.has(field_flags::PASSWORD);
+                let max_len = f.max_len;
+                let rows = ((rect.height() / (font * 1.3)).floor() as usize).max(1);
+                let id = egui::Id::new(("form-field", view.id.0, &f.name, focus.widget));
+                let width = rect.width() - 6.0;
+                fn setup(mut te: egui::TextEdit<'_>, width: f32, password: bool, max_len: Option<usize>, rows: Option<usize>) -> egui::TextEdit<'_> {
+                    te = te
+                        .desired_width(width)
+                        .background_color(Color32::from_rgb(0xFF, 0xFF, 0xF4))
+                        .text_color(Color32::BLACK)
+                        .margin(egui::Margin::symmetric(3, 1))
+                        .password(password);
+                    if let Some(max) = max_len {
+                        te = te.char_limit(max);
+                    }
+                    if let Some(rows) = rows {
+                        te = te.desired_rows(rows);
+                    }
+                    te
                 }
-                if multiline {
-                    te = te.desired_rows(((rect.height() / (font * 1.3)).floor() as usize).max(1));
-                }
-                let r = ui.add_sized(rect.size(), te);
+                let rows = multiline.then_some(rows);
+                let r = if password {
+                    // Masked: never laid out from its real text.
+                    let te = if multiline { egui::TextEdit::multiline(&mut fx.text) } else { egui::TextEdit::singleline(&mut fx.text) };
+                    ui.add_sized(rect.size(), setup(te.font(egui::FontId::proportional(font)).id(id), width, password, max_len, rows))
+                } else {
+                    // As `add_sized`, with right-to-left text drawn and edited in display order.
+                    let layout = egui::Layout::centered_and_justified(ui.layout().main_dir());
+                    ui.allocate_ui_with_layout(rect.size(), layout, |ui| {
+                        crate::bidi_field::field(ui, &mut fx.text, id, multiline, Some(egui::FontId::proportional(font)), |te| {
+                            setup(te, width, false, max_len, rows)
+                        })
+                    })
+                    .inner
+                };
                 if fx.request_focus {
                     r.request_focus();
                     fx.request_focus = false;

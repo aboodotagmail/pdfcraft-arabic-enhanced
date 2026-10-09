@@ -339,7 +339,7 @@
 	Centre	居中
 	Align right	右對齊
 	Justify	兩端對齊
-	Standard fonts; text outside Windows-1252 isn't supported yet.	標準字型；尚不支援 Windows-1252 之外的文字。
+	Standard fonts; Arabic is embedded in Noto Sans Arabic. Other text outside Windows-1252 isn't supported yet.	標準字型；阿拉伯文以 Noto Sans Arabic 嵌入。尚不支援 Windows-1252 之外的其他文字。
 	Edit image	編輯圖片
 	Rotate counterclockwise	逆時針旋轉
 	Rotate clockwise	順時針旋轉
