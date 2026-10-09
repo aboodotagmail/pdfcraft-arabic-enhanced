@@ -114,9 +114,12 @@ Set-Content -LiteralPath (Join-Path $Smoke 'cli-arabic.txt') -Value $out -Encodi
 if ($LASTEXITCODE -ne 0) { Write-Output $out; throw "pdfcraft-cli run (Arabic) exited $LASTEXITCODE" }
 if ($out -notmatch 'مرحبا' -or $out -notmatch 'بالعالم') { Write-Output $out; throw 'the Arabic text was not extracted back' }
 if ($out -notmatch '"count":\s*1') { Write-Output $out; throw 'text_find did not find the Arabic word' }
-$saved = [System.IO.File]::ReadAllBytes((Join-Path $Smoke 'arabic.pdf'))
-$latin1 = [System.Text.Encoding]::Latin1.GetString($saved)
-if ($latin1 -notmatch '/CIDFontType2' -or $latin1 -notmatch '/FontFile2' -or $latin1 -notmatch '/ToUnicode') { throw 'the Arabic text is not in an embedded CID TrueType font with ToUnicode' }
+# (The embedded CIDFontType2/FontFile2/ToUnicode structure is checked by the Rust tests; a full
+# save packs those dictionaries into compressed object streams, so they aren't visible here.)
+foreach ($f in 'arabic.pdf', 'arabic.png') {
+  $p = Join-Path $Smoke $f
+  if (-not (Test-Path $p) -or (Get-Item $p).Length -eq 0) { Write-Output $out; throw "$f was not written" }
+}
 Write-Output 'ok installed pdfcraft-cli: Arabic added, embedded, saved, extracted and found'
 
 # 4. The installed app starts and draws its window (answers a screenshot over the control channel).
