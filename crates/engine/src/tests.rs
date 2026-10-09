@@ -2305,6 +2305,162 @@ fn ruled_arabic_table_exports_as_one_word_table() {
     assert_eq!(xml.matches("قلم أزرق").count(), 1);
 }
 
+/// A synthetic ten-page Arabic report in the shape the export problems came from: on each page
+/// a heading, two paragraphs of two right-aligned lines, a mixed Arabic/Latin line, a bordered
+/// right-to-left table of five rows and four columns, and a borderless one of three columns.
+/// Pages 1–9 are A4 portrait; page 10 is A4 landscape. All in embedded Noto Sans Arabic.
+/// `None` without the craft-fonts Arabic face.
+fn arabic_report_pdf() -> Option<Vec<u8>> {
+    use pdfcraft_cos::{Dict, Document, Object, Stream};
+    use pdfcraft_fonts::layout::BaseDirection;
+    let mut u = pdfcraft_fonts::paint::UnicodeLines::new().ok()?;
+    let mut doc = Document::new_empty();
+    let mut put = |ops: &mut String, text: &str, right: f64, baseline: f64, size: f64, dir: BaseDirection| -> Option<()> {
+        let (line, width) = u.line_in(text, size, dir).ok()?;
+        ops.push_str(&u.ops(&line, "PCUni", right - width, baseline, size).ok()?);
+        Some(())
+    };
+    let rtl = BaseDirection::Rtl;
+    let mut contents = Vec::new();
+    for n in 1..=10 {
+        let (w, h) = if n == 10 { (842.0, 595.0) } else { (595.0, 842.0) };
+        let right = w - 60.0;
+        let mut ops = String::new();
+        let mut y = h - 70.0;
+        put(&mut ops, &format!("القسم {n}: ملخص الأداء"), right, y, 18.0, rtl)?;
+        y -= 34.0;
+        for line in ["يعرض هذا القسم نتائج الربع الأول من العام مع مقارنة بالفترة السابقة", "وتوضح الأرقام التالية تطور المبيعات في جميع الفروع"]
+        {
+            put(&mut ops, line, right, y, 12.0, rtl)?;
+            y -= 17.0;
+        }
+        y -= 10.0;
+        for line in ["تم إعداد التقرير بناء على البيانات المعتمدة من الإدارة المالية", "ويجب مراجعة الملاحظات الواردة في نهاية المستند"]
+        {
+            put(&mut ops, line, right, y, 12.0, rtl)?;
+            y -= 17.0;
+        }
+        y -= 10.0;
+        put(&mut ops, &format!("رقم الطلب {n}042 ABC"), right, y, 12.0, rtl)?;
+        y -= 30.0;
+        // The bordered table: columns 140 wide from the right, rows 24 high.
+        let (cols, rows, rh, cw) = (4usize, 5usize, 24.0, 110.0);
+        let top = y;
+        let cells = |r: usize, c: usize| -> String {
+            match (r, c) {
+                (0, 0) => "الفرع".into(),
+                (0, 1) => "المبيعات".into(),
+                (0, 2) => "التكلفة".into(),
+                (0, 3) => "الربح".into(),
+                (_, 0) => ["الرياض", "جدة", "الدمام", "مكة"][(r - 1) % 4].into(),
+                _ => format!("{}", (r * 100 + c * 7 + n) * 3),
+            }
+        };
+        for r in 0..rows {
+            for c in 0..cols {
+                let base = top - rh * (r as f64) - 17.0;
+                put(&mut ops, &cells(r, c), right - cw * (c as f64) - 6.0, base, 11.0, rtl)?;
+            }
+        }
+        ops.push_str("0 g 0.5 w\n");
+        let left = right - cw * cols as f64;
+        for r in 0..=rows {
+            let yy = top - rh * r as f64;
+            ops.push_str(&format!("{left} {yy} m {right} {yy} l S\n"));
+        }
+        for c in 0..=cols {
+            let xx = right - cw * c as f64;
+            ops.push_str(&format!("{xx} {} m {xx} {top} l S\n", top - rh * rows as f64));
+        }
+        y = top - rh * rows as f64 - 40.0;
+        // The borderless table: three right-aligned columns, four rows.
+        for r in 0..4 {
+            let row = [["البند", "الكمية", "الملاحظات"], ["أقلام", "١٢", "متوفر"], ["دفاتر", "٣٠", "قيد الطلب"], ["حبر", "٥", "متوفر"]][r];
+            for (c, text) in row.iter().enumerate() {
+                put(&mut ops, text, right - 150.0 * c as f64, y, 11.0, rtl)?;
+            }
+            y -= 18.0;
+        }
+        contents.push((w, h, ops));
+    }
+    let font = u.write(&mut doc).ok()?;
+    let mut fonts = Dict::new();
+    fonts.set(b"PCUni".to_vec(), Object::Ref(font));
+    let mut res = Dict::new();
+    res.set(b"Font".to_vec(), Object::Dict(fonts));
+    let root = doc.root()?;
+    let pages = doc.get(root).as_dict()?.reference(b"Pages")?;
+    let mut kids = Vec::new();
+    for (w, h, ops) in contents {
+        let content = doc.add(Object::Stream(Stream::flate(Dict::new(), ops.as_bytes())));
+        let mut page = Dict::new();
+        page.set(b"Type".to_vec(), Object::name("Page"));
+        page.set(b"Parent".to_vec(), Object::Ref(pages));
+        page.set(b"MediaBox".to_vec(), Object::Array(vec![Object::Int(0), Object::Int(0), Object::Real(w), Object::Real(h)]));
+        page.set(b"Resources".to_vec(), Object::Dict(res.clone()));
+        page.set(b"Contents".to_vec(), Object::Ref(content));
+        kids.push(Object::Ref(doc.add(Object::Dict(page))));
+    }
+    let count = kids.len() as i64;
+    doc.update_dict(pages, |d| {
+        d.set(b"Kids".to_vec(), Object::Array(kids));
+        d.set(b"Count".to_vec(), Object::Int(count));
+    })
+    .ok()?;
+    pdfcraft_cos::write_full(&doc, &Default::default()).ok()
+}
+
+/// The ten-page report stays ten pages in Word: one section per page (the landscape one
+/// landscape), each page's bordered table one Word table of its real 5 × 4 grid with columns
+/// of the page's widths, the borderless one a table too, every paragraph once, in reading
+/// order, with nothing unreadable.
+#[test]
+fn arabic_report_keeps_its_pages_and_tables_in_word() {
+    let Some(pdf) = arabic_report_pdf() else {
+        eprintln!("skipping: built without the craft-fonts Arabic face (set CRAFT_FONTS_DIR)");
+        return;
+    };
+    let mut s = Session::new();
+    let id = s.open("r.pdf", None, std::sync::Arc::new(pdf.clone()), None).unwrap();
+    let d = s.get(id).unwrap();
+    let out = d.export_office_report(compare::OfficeFormat::Docx);
+    if let Ok(dir) = std::env::var("PDFCRAFT_EXPORT_DIR") {
+        std::fs::write(format!("{dir}/arabic-report.pdf"), &pdf).unwrap();
+        std::fs::write(format!("{dir}/arabic-report.docx"), &out.bytes).unwrap();
+    }
+    assert_eq!(out.unreadable, 0);
+    let xml = docx_part(&out.bytes, "word/document.xml");
+    assert_eq!(xml.matches("<w:sectPr>").count(), 10, "one section per page");
+    assert_eq!(xml.matches("w:orient=\"landscape\"").count(), 1);
+    assert!(!xml.contains("w:type=\"page\""));
+    assert_eq!(xml.matches("<w:tbl>").count(), 20, "two tables a page");
+    assert_eq!(xml.matches("<w:bidiVisual/>").count(), 20);
+    // The bordered tables: four columns of 110 pt each.
+    let grid = "<w:tblGrid><w:gridCol w:w=\"2200\"/><w:gridCol w:w=\"2200\"/><w:gridCol w:w=\"2200\"/><w:gridCol w:w=\"2200\"/></w:tblGrid>";
+    assert_eq!(xml.matches(grid).count(), 10, "{xml}");
+    assert_eq!(xml.matches("<w:tr>").count(), 10 * (5 + 4));
+    // Paragraph text (runs joined): each heading once, the two-line paragraphs whole.
+    let paras: Vec<String> = xml
+        .split("<w:p>")
+        .skip(1)
+        .map(|p| p.split("<w:t xml:space=\"preserve\">").skip(1).filter_map(|t| t.split("</w:t>").next()).collect())
+        .collect();
+    for n in 1..=10 {
+        let heading = format!("القسم {n}: ملخص الأداء");
+        assert_eq!(paras.iter().filter(|p| **p == heading).count(), 1, "{heading}: {paras:?}");
+        let order = format!("رقم الطلب {n}042 ABC");
+        assert_eq!(paras.iter().filter(|p| **p == order).count(), 1, "{order}");
+    }
+    let joined = "تم إعداد التقرير بناء على البيانات المعتمدة من الإدارة المالية ويجب مراجعة الملاحظات الواردة في نهاية المستند";
+    assert_eq!(paras.iter().filter(|p| **p == joined).count(), 10, "{paras:?}");
+    assert_eq!(xml.matches(">ABC<").count(), 10, "the Latin of the mixed line, its own run");
+    // Each bordered table reads from the right: header, then the first branch's row.
+    let first = xml.find(grid).unwrap();
+    let at: Vec<usize> = ["الفرع", "المبيعات", "التكلفة", "الربح", "الرياض"].iter().map(|t| first + xml[first..].find(t).unwrap()).collect();
+    assert!(at.windows(2).all(|w| w[0] < w[1]), "{at:?}");
+    assert!(!xml.chars().any(|c| ('\u{E000}'..='\u{F8FF}').contains(&c) || c == '\u{FFFD}'));
+}
+
 /// One part of a .docx (zip written by pdfcraft-export: stored or deflated entries).
 fn docx_part(zip: &[u8], name: &str) -> String {
     use std::io::Read;

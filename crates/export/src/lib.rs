@@ -136,32 +136,31 @@ fn rtl_char(c: char) -> bool {
     matches!(unicode_bidi::bidi_class(c), R | AL | AN)
 }
 
-/// `text` cut into runs that are right to left or not: right-to-left letters and the marks,
-/// spaces and punctuation that follow them form one run, so Word and RTF readers give them
-/// complex-script formatting while Latin keeps its own. The runs stay in logical order.
-fn direction_runs(text: &str) -> Vec<(bool, &str)> {
-    use unicode_bidi::BidiClass::{EN, L};
+/// `text` cut into runs that are right to left or not, in a paragraph that reads right to left
+/// (`rtl`) or not: each character goes where UAX #9 resolves it (odd embedding levels are right
+/// to left), so a neutral between an Arabic word and a number ("القسم 1: ملخص") is in the run
+/// Word places it with. European digits stay out of right-to-left runs (Word would otherwise
+/// show them as Arabic-Indic digits under its "context" numeral setting); Arabic-Indic digits
+/// stay in them. The runs keep logical order.
+fn direction_runs(text: &str, rtl: bool) -> Vec<(bool, &str)> {
+    use unicode_bidi::BidiClass::AN;
+    let level = if rtl { unicode_bidi::Level::rtl() } else { unicode_bidi::Level::ltr() };
+    let info = unicode_bidi::BidiInfo::new(text, Some(level));
     let mut out: Vec<(bool, &str)> = Vec::new();
     let mut start = 0;
     let mut cur: Option<bool> = None;
     for (i, c) in text.char_indices() {
-        let class = unicode_bidi::bidi_class(c);
-        let dir = if rtl_char(c) {
-            Some(true)
-        } else if matches!(class, L | EN) {
-            Some(false)
-        } else {
-            None
-        };
-        match (cur, dir) {
-            (Some(a), Some(b)) if a != b => {
+        let odd = info.levels.get(i).is_some_and(|l| l.is_rtl());
+        let dir = odd || unicode_bidi::bidi_class(c) == AN;
+        match cur {
+            Some(a) if a != dir => {
                 if let Some(t) = text.get(start..i) {
                     out.push((a, t));
                 }
                 start = i;
-                cur = Some(b);
+                cur = Some(dir);
             }
-            (None, Some(b)) => cur = Some(b),
+            None => cur = Some(dir),
             _ => {}
         }
     }
@@ -214,6 +213,10 @@ fn level(b: &Block, body: f64) -> u8 {
 
 /// How far two cell left edges may drift (points) and still be the same grid column.
 const COL_TOL: f64 = 4.0;
+/// Room after the text of a borderless table's last column (points): the gap the other columns
+/// get from the next column's start, at least Word's cell margins (0.08 in each side), so the
+/// widest text of the last column doesn't wrap in Word.
+const END_PAD: f64 = 12.0;
 /// More grid columns than this isn't a table. It also bounds a table's size: every row is
 /// materialized to all its columns, so a hostile page laid out as a staircase of blocks would
 /// otherwise make (blocks / 2)² cells.
@@ -305,7 +308,7 @@ fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
             run.clear();
             return;
         }
-        let right = used.iter().map(|&i| blocks[i].rect[2]).fold(f64::MIN, f64::max) + COL_TOL;
+        let right = used.iter().map(|&i| blocks[i].rect[2]).fold(f64::MIN, f64::max) + COL_TOL + END_PAD;
         let mut rows_out = Vec::new();
         let mut slots: Vec<Option<Cell>> = vec![None; ncols];
         for row in run.drain(..) {
@@ -646,29 +649,36 @@ table{{border-collapse:collapse;margin:1em 0}}td,th{{border:1px solid #999;paddi
 /// their language (Arabic or Hebrew, for digits and proofing). `font` names the family for every
 /// script (Word picks the complex-script font for right-to-left text); without one the
 /// document's defaults apply.
-fn run_xml(text: &str, size: f64, bold: bool, italic: bool, font: Option<&str>) -> String {
+///
+/// In a paragraph with right-to-left text every run carries the complex-script size, bold and
+/// italic too: word processors format weak characters (digits, punctuation) next to
+/// right-to-left text with them.
+fn run_xml(text: &str, rtl_para: bool, size: f64, bold: bool, italic: bool, font: Option<&str>) -> String {
     let half_points = if size.is_finite() { (size * 2.0).round().clamp(2.0, 3276.0) as i64 } else { 24 };
     let fonts = font.map(|f| format!("<w:rFonts w:ascii=\"{0}\" w:hAnsi=\"{0}\" w:cs=\"{0}\"/>", esc(f))).unwrap_or_default();
-    let one = |text: &str, rtl: bool| {
+    let one = |text: &str, rtl: bool, cs: bool| {
         let mut rpr = fonts.clone();
         if bold {
-            rpr.push_str(if rtl { "<w:b/><w:bCs/>" } else { "<w:b/>" });
+            rpr.push_str(if cs { "<w:b/><w:bCs/>" } else { "<w:b/>" });
         }
         if italic {
-            rpr.push_str(if rtl { "<w:i/><w:iCs/>" } else { "<w:i/>" });
+            rpr.push_str(if cs { "<w:i/><w:iCs/>" } else { "<w:i/>" });
         }
         rpr.push_str(&format!("<w:sz w:val=\"{half_points}\"/>"));
+        if cs {
+            rpr.push_str(&format!("<w:szCs w:val=\"{half_points}\"/>"));
+        }
         if rtl {
-            rpr.push_str(&format!("<w:szCs w:val=\"{half_points}\"/><w:rtl/>"));
+            rpr.push_str("<w:rtl/>");
             let hebrew = text.chars().find(|c| rtl_char(*c)).is_some_and(|c| matches!(c, '\u{0590}'..='\u{05FF}' | '\u{FB1D}'..='\u{FB4F}'));
             rpr.push_str(if hebrew { "<w:lang w:bidi=\"he-IL\"/>" } else { "<w:lang w:bidi=\"ar-SA\"/>" });
         }
         format!("<w:r><w:rPr>{rpr}</w:rPr><w:t xml:space=\"preserve\">{}</w:t></w:r>", esc(text))
     };
     if !has_rtl(text) {
-        return one(text, false);
+        return one(text, false, false);
     }
-    direction_runs(text).into_iter().map(|(rtl, t)| one(t, rtl)).collect()
+    direction_runs(text, rtl_para).into_iter().map(|(rtl, t)| one(t, rtl, true)).collect()
 }
 
 /// One Word table: explicit single borders (so it renders without a table style), a grid sized
@@ -727,7 +737,10 @@ fn docx_table(t: &Table, max_width: i64) -> String {
             let paras: String = if c.text.is_empty() {
                 format!("<w:p>{ppr}</w:p>")
             } else {
-                c.text.split('\n').map(|line| format!("<w:p>{ppr}{}</w:p>", run_xml(line, c.size, c.bold, c.italic, c.font.as_deref()))).collect()
+                c.text
+                    .split('\n')
+                    .map(|line| format!("<w:p>{ppr}{}</w:p>", run_xml(line, c.rtl, c.size, c.bold, c.italic, c.font.as_deref())))
+                    .collect()
             };
             s.push_str(&format!("<w:tc><w:tcPr><w:tcW w:w=\"{w}\" w:type=\"dxa\"/>{span}{vmerge}</w:tcPr>{paras}</w:tc>"));
         }
@@ -844,7 +857,7 @@ pub fn docx(pages: &[Page], title: &str) -> Vec<u8> {
     let mut media: Vec<(String, &Image)> = Vec::new();
     // Word needs a paragraph between adjacent tables and after the last one in the body.
     let mut after_table = false;
-    let run = |b: &Block| run_xml(&b.text, b.size, b.bold, b.italic, b.font.as_deref());
+    let run = |b: &Block| run_xml(&b.text, b.rtl, b.size, b.bold, b.italic, b.font.as_deref());
     for it in items(pages) {
         match &it {
             Item::Para(b, lvl, gap) => {
@@ -999,7 +1012,7 @@ fn rtf_text(s: &str) -> String {
 
 /// RTF text with right-to-left runs marked `\rtlch` and given the associated (complex-script)
 /// size, bold and italic RTF readers use for them; text without right-to-left letters is as before.
-fn rtf_runs(text: &str, size: i64, bold: bool, italic: bool) -> String {
+fn rtf_runs(text: &str, rtl_para: bool, size: i64, bold: bool, italic: bool) -> String {
     if !has_rtl(text) {
         return rtf_text(text);
     }
@@ -1010,7 +1023,7 @@ fn rtf_runs(text: &str, size: i64, bold: bool, italic: bool) -> String {
     if italic {
         assoc.push_str("\\ai");
     }
-    direction_runs(text)
+    direction_runs(text, rtl_para)
         .into_iter()
         .map(|(rtl, t)| if rtl { format!("{{\\rtlch{assoc} {}}}", rtf_text(t)) } else { format!("{{\\ltrch {}}}", rtf_text(t)) })
         .collect()
@@ -1033,7 +1046,7 @@ pub fn rtf(pages: &[Page]) -> String {
                 }
                 // RTF alignment is absolute: a right-to-left paragraph starts on the right.
                 let dir = if b.rtl { "\\rtlpar\\qr" } else { "" };
-                s.push_str(&format!("{{\\pard{dir}{fmt} {}\\par}}\n", rtf_runs(&b.text, size, b.bold, b.italic)));
+                s.push_str(&format!("{{\\pard{dir}{fmt} {}\\par}}\n", rtf_runs(&b.text, b.rtl, size, b.bold, b.italic)));
             }
             Item::Table(t) => {
                 let mut edges = t.cols.clone();
@@ -1074,7 +1087,7 @@ pub fn rtf(pages: &[Page]) -> String {
                             fmt.push_str("\\i");
                         }
                         // Lines of the cell break with `\line` inside one cell paragraph.
-                        let text: Vec<String> = c.text.split('\n').map(|l| rtf_runs(l, size, c.bold, c.italic)).collect();
+                        let text: Vec<String> = c.text.split('\n').map(|l| rtf_runs(l, c.rtl, size, c.bold, c.italic)).collect();
                         s.push_str(&format!("{{{fmt} {}}}\\cell", text.join("\\line ")));
                     }
                     s.push_str("\\row\n");
@@ -1274,6 +1287,18 @@ mod tests {
         // A name that would break the XML is escaped.
         let odd = Page { blocks: vec![block("x", [72.0, 700.0, 80.0, 712.0], Some("A&B\"<"))], ..Default::default() };
         assert!(part(&docx(&[odd], "Odd"), "word/fontTable.xml").contains("A&amp;B&quot;&lt;"));
+    }
+
+    /// Runs follow UAX #9: in a right-to-left heading "القسم 1: ملخص", the colon after the number
+    /// is between a number (R for neutrals) and Arabic, so it is right to left; in a
+    /// left-to-right paragraph an Arabic word and the spaces inside it form the only
+    /// right-to-left run.
+    #[test]
+    fn direction_runs_follow_the_bidi_algorithm() {
+        assert_eq!(direction_runs("القسم 1: ملخص الأداء", true), [(true, "القسم "), (false, "1"), (true, ": ملخص الأداء")]);
+        assert_eq!(direction_runs("See سلام عليكم now", false), [(false, "See "), (true, "سلام عليكم"), (false, " now")]);
+        assert_eq!(direction_runs("الكمية ١٢ قطعة", true), [(true, "الكمية ١٢ قطعة")]);
+        assert_eq!(direction_runs("", true), []);
     }
 
     #[test]

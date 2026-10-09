@@ -72,22 +72,29 @@ fn arabic_exports_right_to_left_in_every_format() {
     std::fs::write(dir.join("rtl.docx"), &d).unwrap();
     let xml = unzip(&d, "word/document.xml");
     assert!(xml.contains("<w:p><w:pPr><w:bidi/></w:pPr>"), "{xml}");
-    // The mixed line: an Arabic run (with its trailing space) marked right to left, then the
-    // number and the Latin as a left-to-right run, in logical order.
-    assert!(
-        xml.contains("<w:szCs w:val=\"22\"/><w:rtl/><w:lang w:bidi=\"ar-SA\"/></w:rPr><w:t xml:space=\"preserve\">رقم الفاتورة </w:t></w:r><w:r><w:rPr><w:sz w:val=\"22\"/></w:rPr><w:t xml:space=\"preserve\">123 ABC</w:t>"),
-        "{xml}"
-    );
+    // The mixed line, in logical order, cut where UAX #9 resolves it in a right-to-left
+    // paragraph: the Arabic and its trailing space (level 1), "123" (level 2), the space between
+    // the number and the Latin (a number counts as R for neutrals, R ≠ L, so the space takes the
+    // paragraph's level 1), then "ABC" (level 2). Shown right to left: الفاتورة رقم, 123, ABC
+    // ("ABC 123" read left to right), as the PDF shows it. Every run carries the complex-script
+    // size (word processors use it for digits beside right-to-left text).
+    let runs = [
+        "<w:szCs w:val=\"22\"/><w:rtl/><w:lang w:bidi=\"ar-SA\"/></w:rPr><w:t xml:space=\"preserve\">رقم الفاتورة </w:t></w:r>",
+        "<w:r><w:rPr><w:sz w:val=\"22\"/><w:szCs w:val=\"22\"/></w:rPr><w:t xml:space=\"preserve\">123</w:t></w:r>",
+        "<w:r><w:rPr><w:sz w:val=\"22\"/><w:szCs w:val=\"22\"/><w:rtl/><w:lang w:bidi=\"ar-SA\"/></w:rPr><w:t xml:space=\"preserve\"> </w:t></w:r>",
+        "<w:r><w:rPr><w:sz w:val=\"22\"/><w:szCs w:val=\"22\"/></w:rPr><w:t xml:space=\"preserve\">ABC</w:t>",
+    ];
+    assert!(xml.contains(&runs.concat()), "{xml}");
     assert!(xml.contains("<w:tblPr><w:bidiVisual/>"), "{xml}");
     let first_cell = xml.find(">الاسم<").unwrap();
     assert!(first_cell < xml.find(">الكمية<").unwrap() && xml.find(">الكمية<").unwrap() < xml.find(">السعر<").unwrap());
-    // Latin text is formatted as before: no complex-script properties.
-    assert!(xml.contains("<w:r><w:rPr><w:sz w:val=\"22\"/></w:rPr><w:t xml:space=\"preserve\">The word </w:t>"), "{xml}");
+    // Latin text in a left-to-right paragraph is not marked right to left.
+    assert!(xml.contains("<w:r><w:rPr><w:sz w:val=\"22\"/><w:szCs w:val=\"22\"/></w:rPr><w:t xml:space=\"preserve\">The word </w:t>"), "{xml}");
 
     let r = rtf(&pages);
     std::fs::write(dir.join("rtl.rtf"), &r).unwrap();
     assert!(r.contains("{\\pard\\rtlpar\\qr\\fs22 {\\rtlch\\afs22 "), "{r}");
-    assert!(r.contains("{\\ltrch 123 ABC}"), "{r}");
+    assert!(r.contains("{\\ltrch 123}{\\rtlch\\afs22  }{\\ltrch ABC}"), "{r}");
     // Right-to-left rows, cells in logical order from the right.
     assert!(r.contains("\\trowd\\rtlrow\\trgaph108"), "{r}");
     let cell = |t: &str| r.find(&t.chars().map(|c| format!("\\u{}?", c as u32 as u16 as i16)).collect::<String>()).unwrap();
