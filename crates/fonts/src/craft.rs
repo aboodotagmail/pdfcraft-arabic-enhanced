@@ -82,6 +82,13 @@ fn order_cjk<'a>(faces: impl IntoIterator<Item = &'a CraftFont>, prefer_hans: bo
     out
 }
 
+/// The face for Arabic text written into PDFs: the first regular `Arab` craft-fonts face (Noto
+/// Sans Arabic), else the first `Arab` face. `None` without craft-fonts or without an Arabic face.
+pub fn document_arabic_font() -> Option<&'static CraftFont> {
+    let mut arab = CRAFT_FONTS.iter().filter(|f| f.covers("Arab"));
+    CRAFT_FONTS.iter().find(|f| f.covers("Arab") && f.style == "Regular").or_else(|| arab.next())
+}
+
 /// The face for Japanese text written into PDFs (serif document text): Shippori Mincho, then
 /// BIZ UDMincho, then any other regular `Jpan` face. `None` without craft-fonts.
 pub fn document_japanese_font() -> Option<&'static CraftFont> {
