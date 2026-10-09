@@ -11,9 +11,11 @@ on:
     branches: [main, "claude/**"]
   workflow_dispatch:
 
+# Pushes without [build-msi] start a run whose jobs are all skipped; they must never cancel an MSI
+# build already running, so runs queue instead of cancelling each other.
 concurrency:
-  group: windows-x64-${{ github.ref }}
-  cancel-in-progress: true
+  group: windows-x64-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[build-msi]') }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
