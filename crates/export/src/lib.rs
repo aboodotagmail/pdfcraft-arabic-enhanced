@@ -1383,7 +1383,8 @@ mod tests {
         assert!(r.contains("\\trowd"), "{r}");
         assert_eq!(r.matches("\\row").count(), 4);
         // Boundaries precede the cells; "Totals" spans two columns, so it ends at the third edge.
-        assert!(r.contains("\\trowd\\trgaph108\\cellx4640\\cellx7840\\cellx9920{"), "{r}");
+        // The last column ends 12 pt after its widest text (`END_PAD`, room for cell margins).
+        assert!(r.contains("\\trowd\\trgaph108\\cellx4640\\cellx7840\\cellx10160{"), "{r}");
         assert!(r.contains("\\trowd\\trgaph108\\cellx7840{\\intbl\\fs22 Totals}\\cell\\row"), "{r}");
     }
 
