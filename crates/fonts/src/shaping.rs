@@ -144,7 +144,8 @@ impl ShapingFace {
         buffer.push_str(text);
         buffer.set_direction(if rtl { Direction::RightToLeft } else { Direction::LeftToRight });
         buffer.guess_segment_properties();
-        // One cluster per character where the font allows it, so marks keep their own text.
+        // One cluster per character where the font allows it, so marks keep their own text
+        // (readers place multi-character mappings unevenly in right-to-left text).
         buffer.set_cluster_level(BufferClusterLevel::Characters);
         let shaped = shaper.shape(buffer, ShapeOptions::new());
         // Clusters are byte offsets into `text`; a cluster shows the characters up to the next.
@@ -170,6 +171,7 @@ impl ShapingFace {
             cluster.glyphs.push(PlacedGlyph { gid, dx, dy: pos.y_offset });
             cluster.advance = cluster.advance.saturating_add(pos.x_advance);
         }
+        typed_mark_order(&mut out, rtl);
         Ok(out)
     }
 
@@ -178,6 +180,47 @@ impl ShapingFace {
         let m = self.font.glyph_metrics(skrifa::instance::Size::unscaled(), skrifa::instance::LocationRef::default());
         m.advance_width(skrifa::GlyphId::new(u32::from(gid))).map_or(0, |w| w.round() as i32)
     }
+}
+
+/// The shaper may stack a letter's marks in a different order than they were typed (Arabic
+/// puts shadda first). Readers rebuild text from the drawn order, so within each run of
+/// zero-width mark clusters the texts are given back in typed order: ascending in drawing order
+/// for left-to-right runs, descending for right-to-left ones (read from the right).
+fn typed_mark_order(clusters: &mut [Cluster], rtl: bool) {
+    let is_mark_cluster = |c: &Cluster| c.advance == 0 && !c.text.is_empty() && c.text.chars().all(is_combining_mark);
+    let mut i = 0;
+    while i < clusters.len() {
+        if !clusters.get(i).is_some_and(is_mark_cluster) {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while clusters.get(j).is_some_and(is_mark_cluster) {
+            j += 1;
+        }
+        if let Some(run) = clusters.get_mut(i..j) {
+            let mut typed: Vec<(usize, String)> = run.iter().map(|c| (c.start, c.text.clone())).collect();
+            typed.sort_by_key(|(start, _)| *start);
+            if rtl {
+                typed.reverse();
+            }
+            for (c, (start, text)) in run.iter_mut().zip(typed) {
+                c.start = start;
+                c.text = text;
+            }
+        }
+        i = j;
+    }
+}
+
+/// Combining marks (general category Mn) of the scripts shaped here.
+pub fn is_combining_mark(c: char) -> bool {
+    matches!(c,
+        '\u{0300}'..='\u{036F}' | '\u{0483}'..='\u{0489}' | '\u{0591}'..='\u{05BD}' | '\u{05BF}' | '\u{05C1}'..='\u{05C2}'
+        | '\u{05C4}'..='\u{05C5}' | '\u{05C7}' | '\u{0610}'..='\u{061A}' | '\u{064B}'..='\u{065F}' | '\u{0670}'
+        | '\u{06D6}'..='\u{06DC}' | '\u{06DF}'..='\u{06E4}' | '\u{06E7}'..='\u{06E8}' | '\u{06EA}'..='\u{06ED}'
+        | '\u{08D3}'..='\u{08E1}' | '\u{08E3}'..='\u{08FF}' | '\u{1AB0}'..='\u{1AFF}' | '\u{1DC0}'..='\u{1DFF}'
+        | '\u{20D0}'..='\u{20FF}' | '\u{FE20}'..='\u{FE2F}')
 }
 
 /// Characters shaping hides rather than draws: format controls (bidi marks and embeddings, ZWJ,
@@ -274,15 +317,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn marks_keep_their_own_text_and_no_advance() {
+    fn marks_keep_their_own_text_and_the_order_typed() {
         let Some(face) = face_or_skip() else { return };
-        let c = face.shape("بَ", true).unwrap();
+        let c = face.shape("\u{0628}\u{064E}", true).unwrap();
         assert_eq!(c.len(), 2, "{c:?}");
         let mark = c.iter().find(|c| c.text == "\u{064E}").unwrap();
         assert_eq!(mark.advance, 0);
-        // Above the baseline: the mark is raised or its glyph sits high.
-        let base = c.iter().find(|c| c.text == "ب").unwrap();
-        assert!(base.advance > 0);
+        // Read from the right, the clusters give the text back as typed, whatever order the
+        // shaper stacks the marks in (fatha + shadda and shadda + fatha).
+        for word in ["\u{0631}\u{064E}\u{0651}", "\u{0631}\u{0651}\u{064E}", "الرَّحْمٰنِ", "بِسْمِ"] {
+            let c = face.shape(word, true).unwrap();
+            let read: String = c.iter().rev().map(|c| c.text.as_str()).collect();
+            assert_eq!(read, word);
+        }
     }
 
     #[test]

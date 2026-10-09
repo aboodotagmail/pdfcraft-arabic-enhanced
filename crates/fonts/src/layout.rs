@@ -284,15 +284,8 @@ fn split_wide(
     Ok((start..seg.end, piece_w.saturating_add(last)))
 }
 
-/// Combining marks (general category M) in the scripts we lay out: Arabic tashkeel and the
-/// generic combining blocks.
 fn is_mark(c: char) -> bool {
-    matches!(c,
-        '\u{0300}'..='\u{036F}' | '\u{0483}'..='\u{0489}' | '\u{0591}'..='\u{05BD}' | '\u{05BF}' | '\u{05C1}'..='\u{05C2}'
-        | '\u{05C4}'..='\u{05C5}' | '\u{05C7}' | '\u{0610}'..='\u{061A}' | '\u{064B}'..='\u{065F}' | '\u{0670}'
-        | '\u{06D6}'..='\u{06DC}' | '\u{06DF}'..='\u{06E4}' | '\u{06E7}'..='\u{06E8}' | '\u{06EA}'..='\u{06ED}'
-        | '\u{08D3}'..='\u{08E1}' | '\u{08E3}'..='\u{08FF}' | '\u{1AB0}'..='\u{1AFF}' | '\u{1DC0}'..='\u{1DFF}'
-        | '\u{20D0}'..='\u{20FF}' | '\u{FE20}'..='\u{FE2F}')
+    crate::shaping::is_combining_mark(c)
 }
 
 #[cfg(test)]

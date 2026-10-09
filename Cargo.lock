@@ -3487,6 +3487,7 @@ dependencies = [
  "base64 0.22.1",
  "image",
  "pdfcraft-engine",
+ "pdfcraft-fonts",
  "pdfcraft-organize",
  "pdfcraft-platform",
  "pdfcraft-render",
@@ -3754,6 +3755,7 @@ dependencies = [
  "lopdf",
  "pdfcraft-fonts",
  "thiserror 2.0.21",
+ "unicode-normalization",
 ]
 
 [[package]]

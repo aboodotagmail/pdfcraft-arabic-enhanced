@@ -68,8 +68,15 @@ impl PageText {
     }
 
     /// Search with Acrobat's find options: case-sensitive, whole words only.
+    ///
+    /// Arabic is matched as readers expect: diacritics (tashkeel) and tatweel are ignored, alef
+    /// with hamza or madda matches plain alef, and invisible direction marks are skipped, in both
+    /// the page text and the query.
     pub fn find_opts(&self, needle: &str, case_sensitive: bool, whole_words: bool) -> Vec<std::ops::Range<usize>> {
-        let fold = |s: &str| if case_sensitive { s.to_string() } else { s.to_lowercase() };
+        let fold = |s: &str| -> String {
+            let s = if case_sensitive { s.to_string() } else { s.to_lowercase() };
+            s.chars().filter_map(fold_arabic).collect()
+        };
         let needle: Vec<char> = fold(needle).split_whitespace().collect::<Vec<_>>().join(" ").chars().collect();
         if needle.is_empty() {
             return Vec::new();
@@ -223,6 +230,7 @@ impl<'a> Device<'a> for TextDevice {
             hayro::hayro_interpret::hayro_cmap::BfString::Char(c) => c.to_string(),
             hayro::hayro_interpret::hayro_cmap::BfString::String(s) => s,
         };
+        let text = normalize_presentation_forms(&text).into_owned();
         if text.chars().all(|c| c.is_control()) {
             return;
         }
@@ -260,11 +268,15 @@ impl<'a> Device<'a> for TextDevice {
         if !(b.x0.is_finite() && b.y0.is_finite() && b.x1.is_finite() && b.y1.is_finite()) || b.width() > 10_000.0 || b.height() > 10_000.0 {
             return;
         }
+        let count = text.chars().count();
+        // A right-to-left ligature (lam-alef, ﷲ) shows its first character on the right.
+        let rtl = text.chars().any(is_rtl);
         for (i, ch) in text.chars().enumerate() {
             // Ligatures (e.g. "ffi") share the glyph box, split evenly.
-            let n = text.chars().count().max(1) as f64;
+            let n = count.max(1) as f64;
             let w = b.width() / n;
-            let x0 = b.x0 + w * i as f64;
+            let slot = if rtl { count.saturating_sub(1).saturating_sub(i) } else { i };
+            let x0 = b.x0 + w * slot as f64;
             self.glyphs[dir].push(TextGlyph { text: ch.to_string(), rect: [x0 as f32, b.y0 as f32, (x0 + w) as f32, b.y1 as f32] });
         }
     }
@@ -338,6 +350,156 @@ fn from_upright(r: [f32; 4], quarter: u8, w: f32, h: f32) -> [f32; 4] {
 }
 
 use hayro::hayro_interpret::TransformExt;
+
+/// How search compares Arabic: tashkeel, Quranic marks, tatweel and direction marks drop out;
+/// alef with hamza or madda and alef wasla compare as alef.
+fn fold_arabic(c: char) -> Option<char> {
+    match c {
+        '\u{0610}'..='\u{061A}'
+        | '\u{064B}'..='\u{065F}'
+        | '\u{0670}'
+        | '\u{06D6}'..='\u{06DC}'
+        | '\u{06DF}'..='\u{06E8}'
+        | '\u{06EA}'..='\u{06ED}'
+        | '\u{08D3}'..='\u{08FF}'
+        | '\u{0640}'
+        | '\u{061C}'
+        | '\u{200B}'..='\u{200F}'
+        | '\u{202A}'..='\u{202E}'
+        | '\u{2066}'..='\u{2069}'
+        | '\u{FEFF}' => None,
+        'أ' | 'إ' | 'آ' | 'ٱ' => Some('ا'),
+        c => Some(c),
+    }
+}
+
+/// Arabic presentation forms (positional letters and ligatures, U+FB50–FDFF, U+FE70–FEFF) as the
+/// letters they show (compatibility decomposition), so text from files that map glyphs to
+/// presentation forms is searchable and copies as ordinary Arabic.
+fn normalize_presentation_forms(text: &str) -> std::borrow::Cow<'_, str> {
+    use unicode_normalization::UnicodeNormalization;
+    let presentation = |c: char| matches!(c, '\u{FB50}'..='\u{FDFF}' | '\u{FE70}'..='\u{FEFE}');
+    if !text.chars().any(presentation) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len() * 2);
+    for c in text.chars() {
+        if presentation(c) {
+            out.extend(std::iter::once(c).nfkc());
+        } else {
+            out.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// The writing direction of a glyph's text, for line reordering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dir {
+    /// Right-to-left letters and their marks.
+    R,
+    /// Left-to-right letters.
+    L,
+    /// Digits (European and Arabic-Indic): always read left to right.
+    D,
+    /// Spaces and punctuation.
+    N,
+}
+
+fn dir_class(text: &str) -> Dir {
+    let digit = |c: char| c.is_ascii_digit() || matches!(c, '\u{0660}'..='\u{0669}' | '\u{06F0}'..='\u{06F9}');
+    if text.chars().any(digit) && !text.chars().any(|c| is_rtl(c) && !digit(c)) {
+        Dir::D
+    } else if text.chars().any(is_rtl) {
+        Dir::R
+    } else if text.chars().any(char::is_alphabetic) {
+        Dir::L
+    } else {
+        Dir::N
+    }
+}
+
+/// The logical order of a line drawn left to right (`classes` in drawing order): positions into
+/// it. The inverse of the Unicode bidi algorithm's display order for the two-level lines real
+/// documents have:
+/// - a line with more right-to-left letters than left-to-right ones reads right to left, its
+///   runs of Latin letters and numbers (with the spaces and punctuation between them) keeping
+///   their left-to-right order;
+/// - otherwise it reads left to right, each right-to-left run (letters with the spaces,
+///   punctuation and numbers between them) reversed, numbers inside it kept in order.
+fn visual_to_logical(classes: &[Dir]) -> Vec<usize> {
+    let n = classes.len();
+    let rtl = classes.iter().filter(|c| **c == Dir::R).count();
+    if rtl == 0 {
+        return (0..n).collect();
+    }
+    let ltr = classes.iter().filter(|c| **c == Dir::L).count();
+    let at = |i: usize| classes.get(i).copied().unwrap_or(Dir::N);
+    let mut out = Vec::with_capacity(n);
+    if rtl > ltr {
+        // Islands of L/D, possibly with neutrals inside, stay in drawing order; everything else
+        // is read from the right.
+        let mut units: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut i = 0;
+        while i < n {
+            if matches!(at(i), Dir::L | Dir::D) {
+                let mut end = i + 1;
+                let mut j = i + 1;
+                while j < n && at(j) != Dir::R {
+                    if matches!(at(j), Dir::L | Dir::D) {
+                        end = j + 1;
+                    }
+                    j += 1;
+                }
+                units.push(i..end);
+                i = end;
+            } else {
+                units.push(i..i + 1);
+                i += 1;
+            }
+        }
+        for u in units.into_iter().rev() {
+            out.extend(u);
+        }
+    } else {
+        // Islands of R (with the neutrals and digits between R letters) are reversed, their
+        // digit runs kept in order.
+        let mut i = 0;
+        while i < n {
+            if at(i) != Dir::R {
+                out.push(i);
+                i += 1;
+                continue;
+            }
+            let mut end = i + 1;
+            let mut j = i + 1;
+            while j < n && at(j) != Dir::L {
+                if at(j) == Dir::R {
+                    end = j + 1;
+                }
+                j += 1;
+            }
+            // Reverse i..end, keeping runs of digits (with separators between digits) in order.
+            let mut k = end;
+            while k > i {
+                let last = k - 1;
+                if at(last) == Dir::D {
+                    let mut start = last;
+                    while start > i && (at(start - 1) == Dir::D || (at(start - 1) == Dir::N && start >= i + 2 && at(start - 2) == Dir::D)) {
+                        start -= 1;
+                    }
+                    out.extend(start..k);
+                    k = start;
+                } else {
+                    out.push(last);
+                    k = last;
+                }
+            }
+            i = end;
+        }
+    }
+    out
+}
 
 fn is_rtl(c: char) -> bool {
     matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF)
@@ -507,42 +669,36 @@ pub fn layout(glyphs: Vec<TextGlyph>) -> PageText {
     for b in block_order {
         for si in &blocks[b].0 {
             let s = &segs[*si];
-            let mut idx = s.idx.clone();
-            // Reverse right-to-left runs (visual → logical).
-            let rtl = |i: usize| glyphs[i].text.chars().any(is_rtl);
-            let mut k = 0;
-            while k < idx.len() {
-                if rtl(idx[k]) {
-                    let mut e = k;
-                    while e + 1 < idx.len()
-                        && (rtl(idx[e + 1]) || (glyphs[idx[e + 1]].text.trim().is_empty() && e + 2 < idx.len() && rtl(idx[e + 2])))
-                    {
-                        e += 1;
-                    }
-                    idx[k..=e].reverse();
-                    k = e + 1;
-                } else {
-                    k += 1;
-                }
-            }
-            // Word gaps relative to this line's typical letter gap (handles tracking).
+            // Word gaps between neighbours in drawing order, relative to this line's typical
+            // letter gap (handles tracking).
             let mut gaps: Vec<f32> = s.idx.windows(2).map(|w| glyphs[w[1]].rect[0] - glyphs[w[0]].rect[2]).collect();
             gaps.sort_by(f32::total_cmp);
             let typical = gaps.get(gaps.len() / 3).copied().unwrap_or(0.0).max(0.0);
             let threshold = (typical + s.h * 0.15).max(s.h * 0.15);
-            let mut spaces = vec![false; idx.len()];
-            for w in 1..s.idx.len() {
-                let (p, c) = (s.idx[w - 1], s.idx[w]);
+            // gap_before[w]: a word break between drawn glyphs w - 1 and w.
+            let mut gap_before = vec![false; s.idx.len()];
+            for (w, pair) in s.idx.windows(2).enumerate() {
+                let (p, c) = (pair[0], pair[1]);
                 let gap = glyphs[c].rect[0] - glyphs[p].rect[2];
                 let (pt, ct) = (&glyphs[p].text, &glyphs[c].text);
                 let cjk = pt.chars().any(is_cjk) && ct.chars().any(is_cjk) && gap < s.h * 0.5;
                 let tight_cluster = (pt.chars().any(is_complex) || ct.chars().any(is_complex)) && gap < s.h * 0.6;
-                if gap > threshold && !cjk && !tight_cluster && !pt.trim().is_empty() && !ct.trim().is_empty() {
-                    // Mark the space before glyph `c` wherever it ended up after RTL reversal.
-                    if let Some(pos) = idx.iter().position(|x| *x == c.max(p)) {
-                        spaces[pos] = true;
-                    }
-                }
+                gap_before[w + 1] = gap > threshold && !cjk && !tight_cluster && !pt.trim().is_empty() && !ct.trim().is_empty();
+            }
+            // Logical order (right-to-left runs read from the right), as positions in drawing order.
+            let classes: Vec<Dir> = s.idx.iter().map(|i| dir_class(&glyphs[*i].text)).collect();
+            let perm = visual_to_logical(&classes);
+            let idx: Vec<usize> = perm.iter().filter_map(|k| s.idx.get(*k).copied()).collect();
+            // A word break precedes a glyph when one lies between it and the glyph before it in
+            // drawing order.
+            let mut breaks = vec![0usize; s.idx.len() + 1];
+            for w in 0..s.idx.len() {
+                breaks[w + 1] = breaks[w] + usize::from(gap_before[w]);
+            }
+            let mut spaces = vec![false; idx.len()];
+            for k in 1..perm.len() {
+                let (a, b) = (perm[k - 1].min(perm[k]), perm[k - 1].max(perm[k]));
+                spaces[k] = breaks[b + 1] - breaks[a + 1] > 0;
             }
             for (k, g) in idx.iter().enumerate() {
                 order.push(*g);
@@ -690,6 +846,91 @@ mod tests {
         let mut v = Vec::new();
         word(&mut v, "每个字", 10.0, 10.0, 9.0);
         assert_eq!(layout(v).plain_text(), "每个字");
+    }
+
+    /// A line drawn left to right: `parts` are (text, gap before it in em) pieces, each piece
+    /// one glyph per character, 6 units wide.
+    fn drawn(parts: &[(&str, f32)]) -> Vec<TextGlyph> {
+        let mut v = Vec::new();
+        let mut x = 10.0;
+        for (text, gap) in parts {
+            x += gap * 10.0;
+            for c in text.chars() {
+                v.push(TextGlyph { text: c.to_string(), rect: [x, 10.0, x + 6.0, 20.0] });
+                x += 6.0;
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn arabic_lines_come_out_in_logical_order() {
+        // "مرحبا بالعالم" drawn: the last word leftmost, each word's letters from its end.
+        let t = layout(drawn(&[("ملاعلاب", 0.0), ("ابحرم", 0.5)]));
+        assert_eq!(t.plain_text(), "مرحبا بالعالم");
+        // "بسم الله — رقم 123 ABC" (an Arabic paragraph) is drawn "ABC 123 مقر — هللا مسب".
+        let t = layout(drawn(&[("ABC", 0.0), ("123", 0.5), ("مقر", 0.5), ("—", 0.5), ("هللا", 0.5), ("مسب", 0.5)]));
+        assert_eq!(t.plain_text(), "بسم الله — رقم ABC 123", "the Latin and number run keeps its order");
+        // Arabic-Indic digits and parentheses inside Arabic.
+        let t = layout(drawn(&[("١٢٣", 0.0), ("ددعلا", 0.5), (")ةبرجت(", 0.5)]));
+        assert_eq!(t.plain_text(), "(تجربة) العدد ١٢٣");
+        // An Arabic word inside an English sentence.
+        let t = layout(drawn(&[("The", 0.0), ("word", 0.5), ("مالس", 0.5), ("means", 0.5), ("peace.", 0.5)]));
+        assert_eq!(t.plain_text(), "The word سلام means peace.");
+        // A number between Latin and Arabic in an English line is drawn the same whether it
+        // belongs to the Arabic ("Total: عام 2026") or the Latin ("Total: 2026 عام"); it is read
+        // with the Latin, its digits in order.
+        let t = layout(drawn(&[("Total:", 0.0), ("2026", 0.5), ("ماع", 0.5)]));
+        assert_eq!(t.plain_text(), "Total: 2026 عام");
+    }
+
+    #[test]
+    fn ligatures_and_presentation_forms_give_the_letters_back() {
+        // One lam-alef glyph mapped to two characters.
+        let t = layout(vec![TextGlyph { text: "لا".into(), rect: [10.0, 10.0, 20.0, 20.0] }]);
+        assert_eq!(t.plain_text(), "لا");
+        // Presentation forms (a lam-alef ligature and positional letters) become letters.
+        assert_eq!(normalize_presentation_forms("ﻻ"), "لا");
+        assert_eq!(normalize_presentation_forms("ﺑﺴﻢ"), "بسم");
+        assert_eq!(normalize_presentation_forms("ﷲ"), "الله");
+        assert_eq!(normalize_presentation_forms("plain سلام"), "plain سلام");
+    }
+
+    #[test]
+    fn arabic_search_ignores_diacritics_tatweel_and_hamza_forms() {
+        // Each word drawn from its end, marks included (as shapers draw them).
+        let logical = "بِسْمِ اللهِ الرَّحْمٰنِ الرَّحِيمِ";
+        let words: Vec<String> = logical.split(' ').rev().map(|w| w.chars().rev().collect()).collect();
+        let parts: Vec<(&str, f32)> = words.iter().enumerate().map(|(i, w)| (w.as_str(), if i == 0 { 0.0 } else { 0.5 })).collect();
+        let page = layout(drawn(&parts));
+        assert_eq!(page.plain_text(), logical);
+        assert_eq!(page.find("الرحمن").len(), 1, "no diacritics in the query");
+        assert_eq!(page.find("الرَّحْمٰنِ").len(), 1, "diacritics in the query too");
+        assert_eq!(page.find_opts("الله", false, true).len(), 1, "whole words");
+        let page = layout(drawn(&[("ـــمالسإ", 0.0)]));
+        assert_eq!(page.find("اسلام").len(), 1, "hamza forms and tatweel");
+        assert!(page.find("كتاب").is_empty());
+    }
+
+    #[test]
+    fn visual_to_logical_permutations() {
+        use Dir::*;
+        assert_eq!(visual_to_logical(&[L, L, N, L]), [0, 1, 2, 3]);
+        assert_eq!(visual_to_logical(&[R, R, N, R]), [3, 2, 1, 0]);
+        // RTL line: an LTR island keeps its order.
+        assert_eq!(visual_to_logical(&[L, N, D, N, R, R]), [5, 4, 3, 0, 1, 2]);
+        // LTR line: an RTL island is reversed, its digits kept in order.
+        assert_eq!(visual_to_logical(&[L, L, N, R, N, D, D, N, R]), [0, 1, 2, 8, 7, 5, 6, 4, 3]);
+        assert!(visual_to_logical(&[]).is_empty());
+        for n in 0..40 {
+            for seed in 0..20u32 {
+                let classes: Vec<Dir> =
+                    (0..n).map(|i| [R, L, D, N][((i as u32).wrapping_mul(2_654_435_761).wrapping_add(seed) >> 7) as usize % 4]).collect();
+                let mut p = visual_to_logical(&classes);
+                p.sort_unstable();
+                assert_eq!(p, (0..n).collect::<Vec<_>>(), "a permutation");
+            }
+        }
     }
 
     /// Two lines, "ab cd" and "e fg": words stop at blank glyphs, word gaps and line ends.

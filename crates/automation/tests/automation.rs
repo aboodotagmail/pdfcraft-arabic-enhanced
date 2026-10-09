@@ -2923,3 +2923,32 @@ mod combine_argument_tests {
         }
     }
 }
+
+/// Arabic integrity, end to end: added as shaped text in an embedded font, saved (incrementally
+/// and in full), reopened, and read back in logical order; search ignores diacritics.
+#[test]
+fn arabic_text_round_trips_through_save_extract_and_search() {
+    if pdfcraft_fonts::shaping::ShapingFace::arabic().is_none() {
+        eprintln!("skipping: built without the craft-fonts Arabic face (set CRAFT_FONTS_DIR)");
+        return;
+    }
+    let dir = workdir("arabic-round-trip");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    let text = "بِسْمِ اللهِ الرَّحْمٰنِ الرَّحِيمِ\nمرحبا بالعالم (تجربة) لا إله إلا الله ١٢٣";
+    ok(&mut a, "page_add_text", json!({ "doc": doc, "page": 1, "text": text, "at": [10, 10], "width": 180, "size": 9 }));
+    for (name, incremental) in [("inc.pdf", true), ("full.pdf", false)] {
+        ok(&mut a, "doc_save", json!({ "doc": doc, "path": name, "full": !incremental }));
+        let back = ok(&mut a, "doc_open", json!({ "path": name }))["doc"].as_u64().unwrap();
+        let page = &page_text(&mut a, back)[0];
+        for line in text.lines() {
+            assert!(page.contains(line), "{name}: {line:?} not in {page:?}");
+        }
+        assert!(page.contains("Page 1"), "the page's own text stays: {page:?}");
+        for (query, n) in [("الرحمن", 1), ("مرحبا بالعالم", 1), ("لا إله", 1), ("الله", 2), ("١٢٣", 1)] {
+            let found = ok(&mut a, "text_find", json!({ "doc": back, "query": query }));
+            assert_eq!(found["count"], n, "{name}: {query} {found}");
+        }
+        ok(&mut a, "doc_close", json!({ "doc": back }));
+    }
+}

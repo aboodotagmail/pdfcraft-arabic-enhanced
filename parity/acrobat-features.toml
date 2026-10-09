@@ -1347,7 +1347,7 @@ status = "shipped"
 commands = ["edit.find"]
 tools = ["text_find"]
 evidence = ["crates/ui-egui/tests/ui.rs::find_counts_matches_across_pages", "crates/ui-egui/tests/ui.rs::find_reports_no_matches", "crates/automation/tests/automation.rs::open_inspect_render_and_find", "crates/render/src/text.rs::identity_v_columns_are_searchable_in_reading_order"]
-notes = "Horizontal and WMode 1 vertical text are grouped independently, including a horizontal heading above right-to-left vertical columns. Complex interleaved flows still use a geometric reading-order heuristic."
+notes = "Horizontal and WMode 1 vertical text are grouped independently, including a horizontal heading above right-to-left vertical columns. Complex interleaved flows still use a geometric reading-order heuristic. Arabic matching ignores tashkeel, tatweel and hamza/madda forms of alef (crates/render/src/text.rs::arabic_search_ignores_diacritics_tatweel_and_hamza_forms); ta marbuta/ha and alef maqsura/ya are not folded."
 
 [[feature]]
 id = "view.find-next-previous"
@@ -1938,8 +1938,8 @@ milestone = "M7"
 status = "shipped"
 commands = ["edit.text"]
 tools = ["page_add_text", "content_update"]
-evidence = ["crates/ui-egui/tests/content.rs::typing_moving_styling_and_deleting_added_content", "crates/ui-egui/tests/content.rs::clicking_elsewhere_keeps_the_text_and_starts_a_new_box", "crates/automation/tests/automation.rs::adding_content_through_tools", "crates/edit/src/tests.rs::added_text_and_images_are_page_content_that_stays_editable", "crates/engine/src/tests.rs::added_text_and_images_render_and_stay_editable"]
-notes = "page content, editable later (retype, move, restyle); standard fonts, Windows-1252 text. Each click on the page keeps the box being typed and starts a new one; Done and Discard beside the box"
+evidence = ["crates/edit/src/tests.rs::arabic_added_text_is_embedded_shaped_text_that_stays_editable", "crates/edit/src/tests.rs::text_that_cannot_be_shown_is_refused_and_the_document_is_unchanged", "crates/ui-egui/tests/content.rs::typing_moving_styling_and_deleting_added_content", "crates/ui-egui/tests/content.rs::clicking_elsewhere_keeps_the_text_and_starts_a_new_box", "crates/automation/tests/automation.rs::adding_content_through_tools", "crates/edit/src/tests.rs::added_text_and_images_are_page_content_that_stays_editable", "crates/engine/src/tests.rs::added_text_and_images_render_and_stay_editable"]
+notes = "page content, editable later (retype, move, restyle); standard fonts for Windows-1252 text; Arabic (and other text Windows-1252 can't show) is shaped, laid out right to left and embedded as a Noto Sans Arabic subset with ToUnicode (direction auto/ltr/rtl); text no font can show is refused. Each click on the page keeps the box being typed and starts a new one; Done and Discard beside the box. Missing: a direction control and right-to-left caret in the text box (the UI box shows typed Arabic left to right)."
 
 [[feature]]
 id = "edit.find-replace"
@@ -7066,8 +7066,8 @@ milestone = "M2"
 status = "shipped"
 commands = []
 tools = ["text_extract"]
-evidence = ["crates/render/src/text.rs::rtl_runs_come_out_in_logical_order_and_cjk_has_no_spaces", "crates/render/src/text.rs::lines_words_and_search", "crates/automation/tests/automation.rs::parallel_text_extraction_keeps_page_order_and_follows_edits"]
-notes = ""
+evidence = ["crates/render/src/text.rs::rtl_runs_come_out_in_logical_order_and_cjk_has_no_spaces", "crates/render/src/text.rs::lines_words_and_search", "crates/automation/tests/automation.rs::parallel_text_extraction_keeps_page_order_and_follows_edits", "crates/render/src/text.rs::arabic_lines_come_out_in_logical_order", "crates/render/src/text.rs::ligatures_and_presentation_forms_give_the_letters_back", "crates/automation/tests/automation.rs::arabic_text_round_trips_through_save_extract_and_search"]
+notes = "Arabic: lines read right to left when right-to-left letters dominate, Latin/number runs kept left to right; lam-alef and other multi-letter glyphs split right to left; presentation forms become letters. Missing: the full UAX #9 inverse for lines with nested embeddings, and lines with as many Latin as Arabic letters are read left to right (a number between Latin and Arabic text is read with the Latin)."
 
 [[feature]]
 id = "create.translate"
