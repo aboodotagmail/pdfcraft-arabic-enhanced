@@ -709,3 +709,43 @@ fn signing_with_windows_store_identities() {
         assert!(out.status.success(), "test certificate remains: {thumbprint}");
     }
 }
+
+#[test]
+fn arabic_reason_and_location_are_drawn_with_an_embedded_font_and_the_signature_validates() {
+    let id = pkcs12::open(&data("ec-p256.p12"), "test").unwrap();
+    let o = SignOptions {
+        reason: Some("أوافق على هذا المستند".into()),
+        location: Some("الرياض".into()),
+        appearance: pdfcraft_sign::Appearance { reason: true, location: true, ..Default::default() },
+        ..opts()
+    };
+    if pdfcraft_fonts::shaping::ShapingFace::arabic().is_none() {
+        eprintln!("skipping: built without the craft-fonts Arabic face (set CRAFT_FONTS_DIR)");
+        assert!(pdfcraft_sign::sign(&open(&fixture()), &id, &o).is_err(), "refused rather than drawn as ?");
+        return;
+    }
+    let signed = pdfcraft_sign::sign(&open(&fixture()), &id, &o).unwrap();
+    let doc = open(&signed);
+    let s = signatures(&doc, &signed, &TrustStore { certs: vec![id.certificate.clone()] }).into_iter().find(|s| s.signed).unwrap();
+    assert_eq!(s.status, Status::Valid, "{:?}", s.details);
+    assert_eq!((s.reason.as_deref(), s.location.as_deref()), (Some("أوافق على هذا المستند"), Some("الرياض")));
+    // The appearance has the embedded font and no '?' placeholders.
+    let mut found = false;
+    for num in doc.object_numbers() {
+        let o = doc.try_get(num).unwrap();
+        if let Object::Stream(st) = &*o
+            && st
+                .dict
+                .get(b"Resources")
+                .and_then(Object::as_dict)
+                .and_then(|r| r.get(b"Font"))
+                .and_then(Object::as_dict)
+                .is_some_and(|f| f.contains(b"PCUni"))
+        {
+            let c = String::from_utf8_lossy(&st.decoded().unwrap()).into_owned();
+            assert!(c.contains("/PCUni") && !c.contains("(?"), "{c}");
+            found = true;
+        }
+    }
+    assert!(found, "a signature appearance with the Unicode font");
+}

@@ -193,8 +193,10 @@ pub(crate) fn page_streams(doc: &Document, page: &Dict, index: usize) -> Result<
     Ok((list, data))
 }
 
-/// The boxes and overlay text drawn for the applied marks.
-fn overlay_content(marks: &[&Mark]) -> Vec<u8> {
+/// The boxes and overlay text drawn for the applied marks. Overlay text WinAnsi can't show
+/// (Arabic) is drawn with `uni`, the embedded font shared by every page (`/PCUni`).
+fn overlay_content(marks: &[&Mark], uni: &mut Option<pdfcraft_fonts::paint::UnicodeLines>) -> Result<Vec<u8>, RedactError> {
+    let uni_err = |e: pdfcraft_fonts::paint::TextError| pdfcraft_edit::EditError::Invalid(format!("the overlay text can't be drawn: {e}"));
     let n = |v: f64| {
         let s = format!("{:.3}", v);
         s.trim_end_matches('0').trim_end_matches('.').to_string()
@@ -220,8 +222,33 @@ fn overlay_content(marks: &[&Mark]) -> Vec<u8> {
             pdfcraft_annot::OverlayFont::Courier => ("PCCour", |s, size| s.chars().count() as f64 * size * 0.6),
         };
         let [cr, cg, cb] = look.color.map(|v| v.clamp(0.0, 1.0));
+        let unicode = pdfcraft_fonts::needs_unicode_font(&m.overlay);
         for r in &m.rects {
             let (w, h) = (r[2] - r[0], r[3] - r[1]);
+            if unicode {
+                // One line in the embedded font, auto-sized to fit unless a size is set.
+                let Some(u) = uni.as_mut() else {
+                    return Err(uni_err(pdfcraft_fonts::paint::TextError::Shape(pdfcraft_fonts::shaping::ShapeError::NoFont)).into());
+                };
+                let mut size = if look.size > 0.0 { look.size } else { (h * 0.7).min(12.0) };
+                let tw = u.line(&m.overlay, size).map_err(uni_err)?.1;
+                if look.size <= 0.0 && tw > w - 2.0 && tw > 0.0 {
+                    size *= (w - 2.0).max(0.0) / tw;
+                }
+                if size < 2.0 {
+                    continue;
+                }
+                let (line, lw) = u.line(&m.overlay, size).map_err(uni_err)?;
+                let x = match look.align {
+                    0 => r[0] + 1.0,
+                    2 => r[2] - 1.0 - lw,
+                    _ => r[0] + (w - lw) / 2.0,
+                };
+                let y = r[1] + (h + size * 1.2) / 2.0 - size * 0.95;
+                let ops = u.ops(&line, "PCUni", x, y, size).map_err(uni_err)?;
+                c.extend(format!("q {} {} {} {} re W n {} {} {} rg\n{ops}Q\n", n(r[0]), n(r[1]), n(w), n(h), n(cr), n(cg), n(cb)).bytes());
+                continue;
+            }
             let mut size = if look.size > 0.0 { look.size } else { (h * 0.7).min(12.0) };
             let tw = width(&m.overlay, size);
             if look.size <= 0.0 && tw > w - 2.0 && tw > 0.0 {
@@ -259,7 +286,7 @@ fn overlay_content(marks: &[&Mark]) -> Vec<u8> {
             c.extend_from_slice(b"ET Q\n");
         }
     }
-    c
+    Ok(c)
 }
 
 /// Apply every redaction mark (or only those on `pages`, 0-based). Irreversible for the saved
@@ -269,6 +296,25 @@ pub fn apply(doc: &mut Document, pages: Option<&[usize]>) -> Result<Report, Reda
     let chosen: Vec<&Mark> = all_marks.iter().filter(|m| pages.is_none_or(|p| p.contains(&m.page))).collect();
     if chosen.is_empty() {
         return Err(RedactError::NothingToApply);
+    }
+    // Overlay text is laid out before anything changes: text no font can show stops here.
+    let mut uni = if chosen.iter().any(|m| m.fill.is_some() && pdfcraft_fonts::needs_unicode_font(&m.overlay)) {
+        Some(
+            pdfcraft_fonts::paint::UnicodeLines::new()
+                .map_err(|e| pdfcraft_edit::EditError::Invalid(format!("the overlay text can't be drawn: {e}")))?,
+        )
+    } else {
+        None
+    };
+    let mut overlays: Vec<(usize, Vec<u8>)> = Vec::new();
+    {
+        let mut pages_with_marks: Vec<usize> = chosen.iter().map(|m| m.page).collect();
+        pages_with_marks.sort_unstable();
+        pages_with_marks.dedup();
+        for pi in pages_with_marks {
+            let page_marks: Vec<&Mark> = chosen.iter().copied().filter(|m| m.page == pi).collect();
+            overlays.push((pi, overlay_content(&page_marks, &mut uni)?));
+        }
     }
     let mut report = Report { marks: chosen.len(), ..Report::default() };
     let mut by_page: Vec<usize> = chosen.iter().map(|m| m.page).collect();
@@ -388,11 +434,17 @@ pub fn apply(doc: &mut Document, pages: Option<&[usize]>) -> Result<Report, Reda
     }
 
     // 4. The boxes.
-    for &pi in &by_page {
-        let page_marks: Vec<&Mark> = chosen.iter().copied().filter(|m| m.page == pi).collect();
-        let content = overlay_content(&page_marks);
+    let font = uni
+        .as_ref()
+        .map(|u| u.write(doc))
+        .transpose()
+        .map_err(|e| pdfcraft_edit::EditError::Invalid(format!("the overlay text can't be drawn: {e}")))?;
+    for (pi, content) in overlays {
         if !content.is_empty() {
             pdfcraft_edit::stamp(doc, pi, "Redaction", content)?;
+            if let Some(f) = font {
+                pdfcraft_edit::add_page_font(doc, pi, "PCUni", f)?;
+            }
         }
     }
 

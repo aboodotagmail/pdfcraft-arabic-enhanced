@@ -60,6 +60,45 @@ pub fn layout_points(
     layout(face, text, units as i64, direction, align)
 }
 
+/// Single lines drawn with one shared embedded subset of the Arabic face, for generated
+/// appearances that place each line themselves (marks, signatures, stamps). Lay lines out and
+/// paint them first; [`UnicodeLines::write`] the font once everything is known to be drawable.
+#[derive(Debug)]
+pub struct UnicodeLines {
+    subset: FontSubset<'static>,
+}
+
+impl UnicodeLines {
+    /// [`ShapeError::NoFont`] when the build has no Arabic face.
+    pub fn new() -> Result<UnicodeLines, TextError> {
+        let face = ShapingFace::arabic().ok_or(TextError::Shape(ShapeError::NoFont))?;
+        Ok(UnicodeLines { subset: FontSubset::new(face) })
+    }
+
+    /// `text` laid out as one line (paragraph separators start more lines; only the first is
+    /// returned), with its width in points at `size`.
+    pub fn line(&self, text: &str, size: f64) -> Result<(LaidLine, f64), TextError> {
+        let face = self.subset.face();
+        let mut lines = layout_points(face, text, size, 1e7, BaseDirection::Auto, LineAlign::Left)?;
+        let mut line = if lines.is_empty() { return Err(TextError::Shape(ShapeError::TooLong)) } else { lines.swap_remove(0) };
+        line.x = 0;
+        let w = line.advance() as f64 * size / f64::from(face.units_per_em().max(1));
+        Ok((line, w))
+    }
+
+    /// `BT … ET` drawing `line` in the font named `font` with its left end at (`x`, `y`).
+    pub fn ops(&mut self, line: &LaidLine, font: &str, x: f64, y: f64, size: f64) -> Result<String, TextError> {
+        let opts = PaintOptions { font, size, left: x, baseline: y, leading: size, fake_bold: false, slant: 0.0, actual_text: false };
+        Ok(paint_lines(&mut self.subset, std::slice::from_ref(line), &opts)?)
+    }
+
+    /// Write the font into `doc`; nothing is added on error.
+    pub fn write(&self, doc: &mut Document) -> Result<ObjRef, TextError> {
+        self.subset.font_program()?;
+        Ok(self.subset.write(doc)?)
+    }
+}
+
 /// A block of text written with an embedded subset font: the content operators and the Type0
 /// font to put in the resources under `opts.font`.
 #[derive(Clone, Debug)]

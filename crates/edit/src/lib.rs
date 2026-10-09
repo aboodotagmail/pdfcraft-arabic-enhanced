@@ -377,12 +377,14 @@ const END: &str = "EMC\nQ\n";
 
 /// Lines of page marks that need the embedded Unicode font (Arabic): one subset shared by every
 /// page the mark goes on, written once the content of all pages is known.
-struct UnicodeMarks {
-    subset: pdfcraft_fonts::embed::FontSubset<'static>,
-}
+struct UnicodeMarks(pdfcraft_fonts::paint::UnicodeLines);
 
 /// The resource name of the shared Unicode font in page resources.
 const PC_UNI: &str = "PCUni";
+
+fn mark_error(e: impl std::fmt::Display) -> EditError {
+    EditError::Invalid(format!("the text can't be added: {e}"))
+}
 
 impl UnicodeMarks {
     /// `Some` when any of `texts` needs the Unicode font; an error when the build can't show it.
@@ -390,53 +392,37 @@ impl UnicodeMarks {
         if !texts.into_iter().any(pdfcraft_fonts::needs_unicode_font) {
             return Ok(None);
         }
-        let face = pdfcraft_fonts::shaping::ShapingFace::arabic().ok_or_else(|| {
-            EditError::Invalid("this build has no Arabic font (Noto Sans Arabic from craft-fonts), so the text can't be added".into())
-        })?;
-        Ok(Some(UnicodeMarks { subset: pdfcraft_fonts::embed::FontSubset::new(face) }))
+        pdfcraft_fonts::paint::UnicodeLines::new().map(|u| Some(UnicodeMarks(u))).map_err(mark_error)
     }
 
     /// One line laid out for drawing, and its width in points.
     fn line(&self, text: &str, size: f64) -> Result<(pdfcraft_fonts::layout::LaidLine, f64), EditError> {
-        use pdfcraft_fonts::layout::{BaseDirection, LineAlign};
-        let face = self.subset.face();
-        let mut lines = pdfcraft_fonts::paint::layout_points(face, text, size, 1e7, BaseDirection::Auto, LineAlign::Left)
-            .map_err(|e| EditError::Invalid(format!("the text can't be added: {e}")))?;
-        let mut line = lines.drain(..).next().ok_or_else(|| EditError::Invalid("the text can't be added".into()))?;
-        line.x = 0;
-        let w = line.advance() as f64 * size / f64::from(face.units_per_em().max(1));
-        Ok((line, w))
+        self.0.line(text, size).map_err(mark_error)
     }
 
     /// `BT … ET` drawing `line` with its left end at (`x`, `y`).
     fn ops(&mut self, line: &pdfcraft_fonts::layout::LaidLine, x: f64, y: f64, size: f64) -> Result<Vec<u8>, EditError> {
-        let opts = pdfcraft_fonts::paint::PaintOptions {
-            font: PC_UNI,
-            size,
-            left: x,
-            baseline: y,
-            leading: size,
-            fake_bold: false,
-            slant: 0.0,
-            actual_text: false,
-        };
-        pdfcraft_fonts::paint::paint_lines(&mut self.subset, std::slice::from_ref(line), &opts)
-            .map(String::into_bytes)
-            .map_err(|e| EditError::Invalid(format!("the text can't be added: {e}")))
+        self.0.ops(line, PC_UNI, x, y, size).map(String::into_bytes).map_err(mark_error)
     }
 
     /// Write the font into `doc`.
     fn write(&self, doc: &mut Document) -> Result<pdfcraft_cos::ObjRef, EditError> {
-        self.subset.write(doc).map_err(|e| EditError::Invalid(format!("the text can't be added: {e}")))
+        self.0.write(doc).map_err(mark_error)
     }
 }
 
 /// Make the shared Unicode font available to a page as `/PCUni`.
 fn add_unicode_font(doc: &mut Document, page: usize, font: pdfcraft_cos::ObjRef) -> Result<(), EditError> {
+    add_page_font(doc, page, PC_UNI, font)
+}
+
+/// Put `font` in page `page`'s (own copy of its) `/Font` resources as `name`.
+pub fn add_page_font(doc: &mut Document, page: usize, name: &str, font: pdfcraft_cos::ObjRef) -> Result<(), EditError> {
+    check(&[page], page_list(doc).len())?;
     let p = page_list(doc).swap_remove(page);
     let mut res = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
     let mut fonts = res.get(b"Font").map(|f| doc.resolve(f)).and_then(|f| f.as_dict().cloned()).unwrap_or_default();
-    fonts.set(PC_UNI.as_bytes().to_vec(), Object::Ref(font));
+    fonts.set(name.as_bytes().to_vec(), Object::Ref(font));
     res.set(b"Font".to_vec(), Object::Dict(fonts));
     doc.update_dict(p.obj, |d| d.set(b"Resources".to_vec(), Object::Dict(res)))?;
     Ok(())

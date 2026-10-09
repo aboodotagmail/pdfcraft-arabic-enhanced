@@ -1120,7 +1120,7 @@ fn sign_inner(
         }
     }
     // The appearance.
-    let ap = appearance(rect, &name, &id.certificate, opts);
+    let ap = appearance(&mut doc, rect, &name, &id.certificate, opts)?;
     let ap_ref = doc.add(Object::Stream(ap));
     let mut apd = Dict::new();
     apd.set(b"N".to_vec(), Object::Ref(ap_ref));
@@ -1234,9 +1234,11 @@ pub fn display_date(pdf: &str) -> String {
 }
 
 /// The visible signature: the signer's name large on the left, the details on the right
-/// (Acrobat's standard layout), in Helvetica.
-fn appearance(rect: [f64; 4], name: &str, cert: &Certificate, opts: &SignOptions) -> Stream {
-    use pdfcraft_fonts::{helvetica_width, literal, win_ansi, wrap};
+/// (Acrobat's standard layout), in Helvetica. Text WinAnsi can't show (an Arabic name or reason)
+/// is shaped and drawn with an embedded subset of the Arabic face, added to `doc`.
+fn appearance(doc: &mut Document, rect: [f64; 4], name: &str, cert: &Certificate, opts: &SignOptions) -> Result<Stream, SignError> {
+    use pdfcraft_fonts::{helvetica_width, literal, needs_unicode_font, win_ansi, wrap};
+    let uni_err = |e: pdfcraft_fonts::paint::TextError| SignError::Pdf(format!("the signature's text can't be drawn: {e}"));
     let (w, h) = ((rect[2] - rect[0]).max(0.0), (rect[3] - rect[1]).max(0.0));
     let a = &opts.appearance;
     let mut lines: Vec<String> = Vec::new();
@@ -1262,6 +1264,18 @@ fn appearance(rect: [f64; 4], name: &str, cert: &Certificate, opts: &SignOptions
         lines.push(label("Date: ", &display_date(&opts.date)));
     }
     lines.retain(|l| !l.is_empty());
+    let mut uni = if needs_unicode_font(name) || lines.iter().any(|l| needs_unicode_font(l)) {
+        Some(pdfcraft_fonts::paint::UnicodeLines::new().map_err(uni_err)?)
+    } else {
+        None
+    };
+    // A line's width at `size`: shaped for Unicode text, Helvetica otherwise.
+    let width_of = |uni: &Option<pdfcraft_fonts::paint::UnicodeLines>, l: &str, size: f64| -> Result<f64, SignError> {
+        match uni {
+            Some(u) if needs_unicode_font(l) => Ok(u.line(l, 1.0).map_err(uni_err)?.1 * size),
+            _ => Ok(helvetica_width(l, size)),
+        }
+    };
     let mut out = Vec::new();
     if w > 1.0 && h > 1.0 {
         let pad = (h * 0.06).clamp(1.0, 6.0);
@@ -1272,32 +1286,53 @@ fn appearance(rect: [f64; 4], name: &str, cert: &Certificate, opts: &SignOptions
             // The name fills the left half.
             let mut size = (h * 0.4).min(36.0);
             let fit = (left_w - 2.0 * pad).max(1.0);
-            let longest = helvetica_width(name, 1.0).max(0.01);
+            let longest = width_of(&uni, name, 1.0)?.max(0.01);
             size = size.min(fit / longest).max(4.0);
-            let words = wrap(name, size, fit);
+            let words = if needs_unicode_font(name) { vec![name.to_string()] } else { wrap(name, size, fit) };
             let total = words.len() as f64 * size * 1.1;
             let mut y = (h + total) / 2.0 - size * 0.85;
             for l in &words {
-                out.extend(format!("/Helv {} Tf 1 0 0 1 {} {} Tm ", fmt(size), fmt(pad), fmt(y)).bytes());
-                out.extend(literal(&win_ansi(l)));
-                out.extend_from_slice(b" Tj\n");
+                match uni.as_mut() {
+                    Some(u) if needs_unicode_font(l) => {
+                        let (line, _) = u.line(l, size).map_err(uni_err)?;
+                        out.extend(format!("ET\n{}BT\n", u.ops(&line, "PCUni", pad, y, size).map_err(uni_err)?).bytes());
+                    }
+                    _ => {
+                        out.extend(format!("/Helv {} Tf 1 0 0 1 {} {} Tm ", fmt(size), fmt(pad), fmt(y)).bytes());
+                        out.extend(literal(&win_ansi(l)));
+                        out.extend_from_slice(b" Tj\n");
+                    }
+                }
                 y -= size * 1.1;
             }
         }
         // The details, shrunk to fit the right side.
         let mut size = (h / (lines.len().max(1) as f64 * 1.15)).min(12.0);
         let wrapped = loop {
-            let all: Vec<String> = lines.iter().flat_map(|l| wrap(l, size, right_w)).collect();
-            if all.len() as f64 * size * 1.15 <= h - 2.0 * pad || size <= 3.0 {
+            // Unicode lines are not wrapped; the size shrinks until they fit.
+            let all: Vec<String> = lines.iter().flat_map(|l| if needs_unicode_font(l) { vec![l.clone()] } else { wrap(l, size, right_w) }).collect();
+            let mut too_wide = false;
+            for l in all.iter().filter(|l| needs_unicode_font(l)) {
+                too_wide |= width_of(&uni, l, size)? > right_w;
+            }
+            if (all.len() as f64 * size * 1.15 <= h - 2.0 * pad && !too_wide) || size <= 3.0 {
                 break all;
             }
             size *= 0.9;
         };
         let mut y = h - pad - size * 0.9;
         for l in &wrapped {
-            out.extend(format!("/Helv {} Tf 1 0 0 1 {} {} Tm ", fmt(size), fmt(right_x), fmt(y)).bytes());
-            out.extend(literal(&win_ansi(l)));
-            out.extend_from_slice(b" Tj\n");
+            match uni.as_mut() {
+                Some(u) if needs_unicode_font(l) => {
+                    let (line, _) = u.line(l, size).map_err(uni_err)?;
+                    out.extend(format!("ET\n{}BT\n", u.ops(&line, "PCUni", right_x, y, size).map_err(uni_err)?).bytes());
+                }
+                _ => {
+                    out.extend(format!("/Helv {} Tf 1 0 0 1 {} {} Tm ", fmt(size), fmt(right_x), fmt(y)).bytes());
+                    out.extend(literal(&win_ansi(l)));
+                    out.extend_from_slice(b" Tj\n");
+                }
+            }
             y -= size * 1.15;
         }
         out.extend_from_slice(b"ET\n");
@@ -1313,10 +1348,13 @@ fn appearance(rect: [f64; 4], name: &str, cert: &Certificate, opts: &SignOptions
     font.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
     let mut fonts = Dict::new();
     fonts.set(b"Helv".to_vec(), Object::Dict(font));
+    if let Some(u) = &uni {
+        fonts.set(b"PCUni".to_vec(), Object::Ref(u.write(doc).map_err(uni_err)?));
+    }
     let mut res = Dict::new();
     res.set(b"Font".to_vec(), Object::Dict(fonts));
     d.set(b"Resources".to_vec(), Object::Dict(res));
-    Stream::flate(d, &out)
+    Ok(Stream::flate(d, &out))
 }
 
 fn fmt(v: f64) -> String {

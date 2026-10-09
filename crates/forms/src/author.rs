@@ -563,7 +563,7 @@ fn redraw_field_inner(doc: &mut Document, name: &str) -> Result<(), FormError> {
                 appearance::check_box_states(doc, w, f.kind, &on)
             }
             FieldKind::PushButton => {
-                let s = button_appearance(doc, w);
+                let s = button_appearance(doc, w)?;
                 let r = doc.add(Object::Stream(s));
                 let mut d = Dict::new();
                 d.set(b"N".to_vec(), Object::Ref(r));
@@ -612,7 +612,7 @@ fn form_stream(width: f64, height: f64, content: Vec<u8>, resources: Dict) -> St
 
 /// A push button: background, border, its icon (`/MK /I`, scaled to fit and centred) and its
 /// centred caption (unless the layout is icon only, `/TP 1`).
-fn button_appearance(doc: &Document, w: &Widget) -> Stream {
+fn button_appearance(doc: &mut Document, w: &Widget) -> Result<Stream, FormError> {
     let (mut c, width, height) = frame_only(doc, w);
     let wobj = doc.get(w.obj);
     let mk = wobj.as_dict().and_then(|d| d.get(b"MK")).map(|m| doc.resolve(m)).and_then(|m| m.as_dict().cloned()).unwrap_or_default();
@@ -635,7 +635,17 @@ fn button_appearance(doc: &Document, w: &Widget) -> Stream {
             xobjects.set(b"Icon".to_vec(), Object::Ref(icon));
         }
     }
-    if !icon_only && !caption.is_empty() {
+    let mut unicode_font = None;
+    if !icon_only && !caption.is_empty() && pdfcraft_fonts::needs_unicode_font(&caption) {
+        // A caption WinAnsi can't show (Arabic): shaped, in an embedded subset.
+        let err = |e: pdfcraft_fonts::paint::TextError| FormError::Invalid(format!("the button's caption can't be drawn: {e}"));
+        let mut u = pdfcraft_fonts::paint::UnicodeLines::new().map_err(err)?;
+        let size = ((height - 4.0) * 0.6).clamp(4.0, 14.0);
+        let (line, tw) = u.line(&caption, size).map_err(err)?;
+        let ops = u.ops(&line, "PCUni", (width - tw) / 2.0, (height - size * 0.7) / 2.0, size).map_err(err)?;
+        content.extend(format!("0 g\n{ops}").bytes());
+        unicode_font = Some(u.write(doc).map_err(err)?);
+    } else if !icon_only && !caption.is_empty() {
         let size = ((height - 4.0) * 0.6).clamp(4.0, 14.0);
         let tw = helvetica_width(&caption, size);
         content.extend(format!("BT /Helv {size:.2} Tf 0 g 1 0 0 1 {:.3} {:.3} Tm ", (width - tw) / 2.0, (height - size * 0.7) / 2.0).bytes());
@@ -649,12 +659,15 @@ fn button_appearance(doc: &Document, w: &Widget) -> Stream {
     font.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
     let mut fonts = Dict::new();
     fonts.set(b"Helv".to_vec(), Object::Dict(font));
+    if let Some(f) = unicode_font {
+        fonts.set(b"PCUni".to_vec(), Object::Ref(f));
+    }
     let mut res = Dict::new();
     res.set(b"Font".to_vec(), Object::Dict(fonts));
     if !xobjects.is_empty() {
         res.set(b"XObject".to_vec(), Object::Dict(xobjects));
     }
-    form_stream(width, height, content, res)
+    Ok(form_stream(width, height, content, res))
 }
 
 /// Give a push button (an image field) the picture `image` (an image XObject of `px` pixels):

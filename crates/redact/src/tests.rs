@@ -455,3 +455,24 @@ fn tags_lose_what_redaction_removed() {
     assert_eq!(public.get(b"K").and_then(Object::as_int), Some(1));
     assert!(public.get(b"ActualText").is_some(), "untouched content keeps its tags");
 }
+
+#[test]
+fn arabic_overlay_text_is_drawn_with_an_embedded_font() {
+    let mut doc = one_page(b"BT /F1 10 Tf 10 100 Td (Secret) Tj ET", "", vec![]);
+    mark(&mut doc, 0, &[[0.0, 80.0, 200.0, 130.0]], "محجوب");
+    if pdfcraft_fonts::shaping::ShapingFace::arabic().is_none() {
+        eprintln!("skipping: built without the craft-fonts Arabic face (set CRAFT_FONTS_DIR)");
+        let before = write_incremental(&doc, &SaveOptions::default()).unwrap();
+        assert!(apply(&mut doc, None).is_err(), "refused before anything changes");
+        assert_eq!(write_incremental(&doc, &SaveOptions::default()).unwrap(), before);
+        return;
+    }
+    apply(&mut doc, None).unwrap();
+    let c = content(&doc, 0);
+    assert!(c.contains("/PCUni") && !c.contains("Secret") && !c.contains("(?"), "{c}");
+    let p = pdfcraft_model::pages(&doc).swap_remove(0);
+    let res = doc.resolve(p.dict.get(b"Resources").unwrap()).as_dict().cloned().unwrap();
+    let fonts = doc.resolve(res.get(b"Font").unwrap()).as_dict().cloned().unwrap();
+    assert!(fonts.contains(b"PCUni"));
+    write_full(&doc, &Default::default()).unwrap();
+}

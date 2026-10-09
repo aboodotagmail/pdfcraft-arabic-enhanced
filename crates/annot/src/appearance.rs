@@ -659,8 +659,13 @@ fn freetext_box(d: &Dict) -> Option<FreeTextBox> {
 /// Whether a FreeText comment's text needs the embedded Unicode font (Arabic and other text
 /// WinAnsi can't show).
 pub fn needs_unicode(d: &Dict) -> bool {
-    d.name(b"Subtype") == Some(b"FreeText")
-        && d.get(b"Contents").and_then(|o| o.as_string()).is_some_and(|s| pdfcraft_fonts::needs_unicode_font(&s.to_text()))
+    let has = |key: &[u8]| d.get(key).and_then(|o| o.as_string()).is_some_and(|s| pdfcraft_fonts::needs_unicode_font(&s.to_text()));
+    match d.name(b"Subtype") {
+        Some(b"FreeText") => has(b"Contents"),
+        // PdfCraft's dynamic stamps: an Arabic name in the "By … at …" line.
+        Some(b"Stamp") => matches!(d.get(b"PCStamp"), Some(Object::Bool(true))) && has(b"PCByLine"),
+        _ => false,
+    }
 }
 
 /// The normal appearance of a FreeText comment whose text needs the embedded Unicode font: the
@@ -670,6 +675,9 @@ pub fn needs_unicode(d: &Dict) -> bool {
 pub fn build_unicode(doc: &mut Document, d: &Dict) -> Result<Option<Stream>, String> {
     use pdfcraft_fonts::layout::{BaseDirection, LineAlign};
     use pdfcraft_fonts::paint::{PaintOptions, layout_points, write_block};
+    if d.name(b"Subtype") == Some(b"Stamp") {
+        return stamp_unicode(doc, d);
+    }
     let text = d.get(b"Contents").and_then(|o| o.as_string()).map(PdfString::to_text).unwrap_or_default();
     let mut frame_dict = d.clone();
     frame_dict.remove(b"Contents");
@@ -717,6 +725,48 @@ pub fn build_unicode(doc: &mut Document, d: &Dict) -> Result<Option<Stream>, Str
 
 /// A rubber stamp: a rounded frame (a pointed tag for sign-here stamps) with the label in bold
 /// capitals, and the dynamic stamps' "By … at …" line.
+/// A PdfCraft stamp whose by-line needs the embedded Unicode font: the stamp [`build`] draws
+/// (frame and label, laid out for a by-line) with the by-line added in the embedded font.
+fn stamp_unicode(doc: &mut Document, d: &Dict) -> Result<Option<Stream>, String> {
+    let Some(base) = build(d) else { return Ok(None) };
+    let Some(kind) = d.name(b"Name").and_then(crate::StampKind::from_name) else { return Ok(None) };
+    let Some(r) = nums(d, b"Rect").filter(|r| r.len() == 4) else { return Ok(None) };
+    let rect = [r[0].min(r[2]), r[1].min(r[3]), r[0].max(r[2]), r[1].max(r[3])];
+    let by = d.get(b"PCByLine").and_then(|o| o.as_string()).map(PdfString::to_text).unwrap_or_default();
+    let err = |e: pdfcraft_fonts::paint::TextError| format!("the stamp's text can't be drawn: {e}");
+    let mut uni = pdfcraft_fonts::paint::UnicodeLines::new().map_err(err)?;
+    let (a0, a1, by_h, baseline) = by_line_box(kind, rect);
+    let (_, w1) = uni.line(&by, 1.0).map_err(err)?;
+    let size = by_h.min((a1 - a0 - 4.0).max(1.0) / w1.max(0.01));
+    let (line, w) = uni.line(&by, size).map_err(err)?;
+    let col = color(d, b"C").flatten().unwrap_or(kind.color());
+    let text_col = if kind.group() == crate::StampGroup::SignHere { [1.0, 1.0, 1.0] } else { col };
+    let ops = uni.ops(&line, "PCUni", a0 + (a1 - a0 - w) / 2.0, baseline, size).map_err(err)?;
+    let mut content = base.decoded().map_err(|e| e.to_string())?;
+    content.extend(format!("{}{ops}", rg(text_col)).bytes());
+    let font = uni.write(doc).map_err(err)?;
+    let mut sd = base.dict.clone();
+    sd.remove(b"Filter");
+    sd.remove(b"DecodeParms");
+    sd.remove(b"Length");
+    let mut res = sd.get(b"Resources").and_then(Object::as_dict).cloned().unwrap_or_default();
+    let mut fonts = res.get(b"Font").and_then(Object::as_dict).cloned().unwrap_or_default();
+    fonts.set(b"PCUni".to_vec(), Object::Ref(font));
+    res.set(b"Font".to_vec(), Object::Dict(fonts));
+    sd.set(b"Resources".to_vec(), Object::Dict(res));
+    Ok(Some(Stream::flate(sd, &content)))
+}
+
+/// Where a stamp's "By … at …" line goes: the text area's left and right edges, the line's
+/// largest size and its baseline.
+fn by_line_box(kind: crate::StampKind, rect: [f64; 4]) -> (f64, f64, f64, f64) {
+    let [x0, y0, x1, y1] = rect;
+    let h = y1 - y0;
+    let lw = (h * 0.07).clamp(1.0, 3.0);
+    let area = if kind.group() == crate::StampGroup::SignHere { (x0 + h * 0.45, x1 - lw * 2.0) } else { (x0 + lw * 2.0, x1 - lw * 2.0) };
+    (area.0, area.1, h * 0.22, y0 + h * 0.18)
+}
+
 fn stamp(kind: crate::StampKind, rect: [f64; 4], col: Rgb, by: Option<&str>, opacity: f64, mut res: Dict) -> Stream {
     let [x0, y0, x1, y1] = rect;
     let h = y1 - y0;
@@ -793,7 +843,7 @@ fn stamp(kind: crate::StampKind, rect: [f64; 4], col: Rgb, by: Option<&str>, opa
         ));
     }
     let label = kind.label();
-    let (title_h, by_h) = if by.is_some() { (h * 0.5, h * 0.22) } else { (h * 0.52, 0.0) };
+    let title_h = if by.is_some() { h * 0.5 } else { h * 0.52 };
     let text_area = if kind.group() == crate::StampGroup::SignHere { (x0 + h * 0.45, x1 - lw * 2.0) } else { (x0 + lw * 2.0, x1 - lw * 2.0) };
     let mut size = title_h;
     let tw = text_width(label, size) * 1.12;
@@ -810,16 +860,16 @@ fn stamp(kind: crate::StampKind, rect: [f64; 4], col: Rgb, by: Option<&str>, opa
     );
     out.extend(literal(&win_ansi(label)));
     out.extend_from_slice(b" Tj\n");
-    if let Some(b) = by {
+    // A by-line with text WinAnsi can't show is drawn by `build_unicode`.
+    if let Some(b) = by.filter(|b| !pdfcraft_fonts::needs_unicode_font(b)) {
+        let (a0, a1, by_h, base) = by_line_box(kind, rect);
         let mut s = by_h;
         let bw = text_width(b, s);
-        if bw > text_area.1 - text_area.0 - 4.0 {
-            s *= (text_area.1 - text_area.0 - 4.0) / bw;
+        if bw > a1 - a0 - 4.0 {
+            s *= (a1 - a0 - 4.0) / bw;
         }
         let bw = text_width(b, s);
-        out.extend(
-            format!("/Helv {} Tf\n1 0 0 1 {} {} Tm ", n(s), n(text_area.0 + (text_area.1 - text_area.0 - bw) / 2.0), n(y0 + h * 0.18)).bytes(),
-        );
+        out.extend(format!("/Helv {} Tf\n1 0 0 1 {} {} Tm ", n(s), n(a0 + (a1 - a0 - bw) / 2.0), n(base)).bytes());
         out.extend(literal(&win_ansi(b)));
         out.extend_from_slice(b" Tj\n");
     }

@@ -775,3 +775,21 @@ fn arabic_comments_are_drawn_with_an_embedded_font() {
     assert!(set_contents(&mut doc, 1, i, "سلام 日本", &meta("")).is_err());
     assert_eq!(write_incremental(&doc, &SaveOptions::default()).unwrap(), before);
 }
+
+#[test]
+fn stamps_with_an_arabic_by_line_use_the_embedded_font() {
+    let mut doc = fixture();
+    let shape =
+        Shape::Stamp { rect: [100.0, 100.0, 260.0, 142.0], stamp: StampKind::DynApproved, by: Some("بواسطة أحمد، 2:14 م".into()) };
+    let new = NewAnnotation { page: 0, style: Style::default_for(&shape), shape, contents: String::new(), author: "أحمد".into() };
+    if pdfcraft_fonts::shaping::ShapingFace::arabic().is_none() {
+        eprintln!("skipping: built without the craft-fonts Arabic face (set CRAFT_FONTS_DIR)");
+        assert!(add_annotation(&mut doc, &new, &Meta::default()).is_err());
+        assert!(!doc.is_modified());
+        return;
+    }
+    let i = add_annotation(&mut doc, &new, &Meta::default()).unwrap();
+    let doc = reopen(&doc);
+    let ap = ap_content(&doc, &list(&doc, 0)[i]);
+    assert!(ap.contains("(APPROVED) Tj") && ap.contains("/PCUni") && !ap.contains("(?"), "{ap}");
+}

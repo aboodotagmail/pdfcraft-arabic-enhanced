@@ -315,6 +315,9 @@ impl Emitter<'_> {
         let mut fonts: BTreeMap<&'static str, &'static str> = BTreeMap::new();
         let mut xobjects = Dict::new();
         let mut annots = Vec::new();
+        // Text WinAnsi can't show (Arabic): shaped, in one embedded subset per page.
+        let mut uni: Option<pdfcraft_fonts::paint::UnicodeLines> = None;
+        let uni_err = |e: pdfcraft_fonts::paint::TextError| XfaError::Malformed(format!("text can't be drawn: {e}"));
         let h = page.height;
         for (i, item) in page.items.iter().enumerate() {
             match item {
@@ -335,6 +338,15 @@ impl Emitter<'_> {
                         )
                         .bytes(),
                     );
+                }
+                Item::Text(s) if pdfcraft_fonts::needs_unicode_font(&s.text) => {
+                    let u = match uni.as_mut() {
+                        Some(u) => u,
+                        None => uni.insert(pdfcraft_fonts::paint::UnicodeLines::new().map_err(uni_err)?),
+                    };
+                    let (line, _) = u.line(&s.text, s.face.size).map_err(uni_err)?;
+                    let ops = u.ops(&line, "PCUni", s.x, h - s.baseline, s.face.size).map_err(uni_err)?;
+                    content.extend(format!("{} rg\n{ops}", rgb(s.face.color)).bytes());
                 }
                 Item::Text(s) => {
                     let name = s.face.resource_name();
@@ -387,6 +399,9 @@ impl Emitter<'_> {
         let mut font_dict = Dict::new();
         for (name, base) in fonts {
             font_dict.set(name.as_bytes().to_vec(), standard_font(base));
+        }
+        if let Some(u) = &uni {
+            font_dict.set(b"PCUni".to_vec(), Object::Ref(u.write(self.doc).map_err(uni_err)?));
         }
         let mut res = Dict::new();
         res.set(b"Font".to_vec(), Object::Dict(font_dict));
