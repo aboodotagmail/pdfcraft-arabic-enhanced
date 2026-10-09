@@ -312,6 +312,150 @@ pub fn field_appearance_as(doc: &Document, f: &Field, w: &Widget, values: &[Stri
     Stream::flate(d, &content)
 }
 
+/// The values a text or choice widget shows: after the Format event (when `format`), combo
+/// boxes' display names, password masking. List boxes show every option's label.
+fn shown(f: &Field, values: &[String], format: bool) -> Vec<String> {
+    let values: Vec<String> = if format
+        && matches!(f.kind, crate::FieldKind::Text | crate::FieldKind::Combo)
+        && values.len() == 1
+        && f.actions.format != crate::af::Format::None
+    {
+        vec![crate::af::format_value(&f.actions.format, &values[0])]
+    } else {
+        values.to_vec()
+    };
+    match f.kind {
+        FieldKind::List => f.options.iter().map(|(_, d)| d.clone()).collect(),
+        _ => {
+            let text: String = if f.kind == FieldKind::Combo {
+                values.iter().map(|v| f.options.iter().find(|(e, _)| e == v).map_or(v.clone(), |(_, d)| d.clone())).collect::<Vec<_>>().join(", ")
+            } else {
+                values.first().cloned().unwrap_or_default()
+            };
+            vec![if f.has(flags::PASSWORD) { "*".repeat(text.chars().count()) } else { text }]
+        }
+    }
+}
+
+/// Whether the widget's text needs the embedded Unicode font (Arabic and other text WinAnsi
+/// can't show).
+pub fn needs_unicode(f: &Field, values: &[String], format: bool) -> bool {
+    matches!(f.kind, FieldKind::Text | FieldKind::Combo | FieldKind::List)
+        && shown(f, values, format).iter().any(|t| pdfcraft_fonts::needs_unicode_font(t))
+}
+
+/// The appearance of a text or choice widget, adding objects to `doc` when its text needs the
+/// embedded Unicode font (shaped, right to left where it is, searchable). An error, with `doc`
+/// unchanged, when no font can show the text.
+pub fn widget_appearance(doc: &mut Document, f: &Field, w: &Widget, values: &[String], format: bool) -> Result<Stream, String> {
+    if !needs_unicode(f, values, format) {
+        return Ok(field_appearance_as(doc, f, w, values, format));
+    }
+    use pdfcraft_fonts::layout::{BaseDirection, LaidLine, LineAlign};
+    use pdfcraft_fonts::paint::{PaintOptions, layout_points, write_block};
+    let face = pdfcraft_fonts::shaping::ShapingFace::arabic()
+        .ok_or_else(|| "this build has no Arabic font (Noto Sans Arabic from craft-fonts), so the field's text can't be drawn".to_string())?;
+    let err = |e: &dyn std::fmt::Display| format!("the field's text can't be drawn: {e}");
+    let texts = shown(f, values, format);
+    let wobj = doc.get(w.obj);
+    let wd = wobj.as_dict().cloned().unwrap_or_default();
+    let (width, height) = ((w.rect[2] - w.rect[0]).max(1.0), (w.rect[3] - w.rect[1]).max(1.0));
+    let da = parse_da(wd.get(b"DA").and_then(|o| doc.resolve(o).as_string().map(|s| s.to_text())).as_deref().unwrap_or(&f.da));
+    let (mut c, bw) = frame(doc, &wd, width, height);
+    let pad = 2.0 + bw;
+    let inner_w = (width - 2.0 * pad).max(1.0);
+    let q = wd.get(b"Q").and_then(|o| doc.resolve(o).as_int()).unwrap_or(f.quadding);
+    let align = match q {
+        1 => LineAlign::Center,
+        2 => LineAlign::Right,
+        _ => LineAlign::Start,
+    };
+    let lay = |text: &str, size: f64, wrap: bool| layout_points(face, text, size, if wrap { inner_w } else { 1e7 }, BaseDirection::Auto, align);
+    let line_width = |l: &LaidLine, size: f64| l.advance() as f64 * size / f64::from(face.units_per_em().max(1));
+    let mut size = da.size;
+    // Lines, with each line's start (left) offset and baseline.
+    let mut lines: Vec<LaidLine> = Vec::new();
+    let leading;
+    let baseline;
+    match f.kind {
+        FieldKind::List => {
+            if size == 0.0 {
+                size = 12.0;
+            }
+            leading = size * 1.15;
+            let top = wd.get(b"TI").and_then(|o| doc.resolve(o).as_int()).unwrap_or(0).max(0) as usize;
+            let mut y = height - pad;
+            for ((export, _), label) in f.options.iter().zip(&texts).skip(top) {
+                if y - leading < 0.0 {
+                    break;
+                }
+                if values.contains(export) {
+                    c.push_str(&format!("0.6 0.75 0.86 rg\n{} {} {} {} re f\n", n(bw), n(y - leading), n(width - 2.0 * bw), n(leading)));
+                }
+                let mut l = lay(label, size, false).map_err(|e| err(&e))?;
+                lines.append(&mut l);
+                y -= leading;
+            }
+            baseline = height - pad - leading + size * 0.25;
+        }
+        _ => {
+            let text = texts.first().cloned().unwrap_or_default();
+            if f.kind == FieldKind::Text && f.has(flags::MULTILINE) {
+                if size == 0.0 {
+                    size = 12.0;
+                    while size > 4.0 && lay(&text, size, true).map_err(|e| err(&e))?.len() as f64 * size * 1.15 > height - 2.0 * pad {
+                        size -= 0.5;
+                    }
+                }
+                lines = lay(&text, size, true).map_err(|e| err(&e))?;
+                leading = size * 1.15;
+                baseline = height - pad - size * 0.85;
+            } else {
+                if size == 0.0 {
+                    size = ((height - 2.0 * pad) / 1.15).clamp(4.0, 12.0);
+                    let tw = lay(&text, size, false).map_err(|e| err(&e))?.first().map_or(0.0, |l| line_width(l, size));
+                    if tw > inner_w {
+                        size = (size * inner_w / tw).max(4.0);
+                    }
+                }
+                lines = lay(&text, size, false).map_err(|e| err(&e))?;
+                // A single-line field shows one line.
+                lines.truncate(1);
+                leading = size * 1.15;
+                baseline = (height - 0.925 * size) / 2.0 + 0.207 * size;
+            }
+        }
+    }
+    // Lines were laid out in an unbounded box for single lines: place them in the field.
+    if !(f.kind == FieldKind::Text && f.has(flags::MULTILINE)) {
+        for l in &mut lines {
+            let w = line_width(l, size);
+            let x = match (align, l.rtl) {
+                (LineAlign::Center, _) => (inner_w - w) / 2.0,
+                (LineAlign::Right, _) | (LineAlign::Start, true) => inner_w - w,
+                _ => 0.0,
+            };
+            l.x = (x * f64::from(face.units_per_em().max(1)) / size) as i64;
+        }
+    }
+    let opts = PaintOptions { font: "PCAr", size, left: pad, baseline, leading, fake_bold: false, slant: 0.0, actual_text: false };
+    let block = write_block(doc, face, &lines, &opts).map_err(|e| err(&e))?;
+    let mut content = c.into_bytes();
+    content.extend(format!("/Tx BMC\nq\n{} {} {} {} re W n\n{}\n", n(bw), n(bw), n(width - 2.0 * bw), n(height - 2.0 * bw), da.color).bytes());
+    content.extend(block.ops.bytes());
+    content.extend_from_slice(b"Q\nEMC\n");
+    let mut fonts = Dict::new();
+    fonts.set(b"PCAr".to_vec(), Object::Ref(block.font));
+    let mut res = Dict::new();
+    res.set(b"Font".to_vec(), Object::Dict(fonts));
+    let mut d = Dict::new();
+    d.set(b"Type".to_vec(), Object::name("XObject"));
+    d.set(b"Subtype".to_vec(), Object::name("Form"));
+    d.set(b"BBox".to_vec(), Object::Array([0.0, 0.0, width, height].iter().map(|v| Object::Real(*v)).collect()));
+    d.set(b"Resources".to_vec(), Object::Dict(res));
+    Ok(Stream::flate(d, &content))
+}
+
 /// On/Off appearances for a check box or radio button that has none (a check mark or a dot,
 /// drawn as paths, so no symbol font is needed).
 /// The streams are added to `doc` as indirect objects (streams can't be direct objects).

@@ -827,3 +827,31 @@ fn page_shapes_reads_boxes_and_rules() {
     assert_eq!(sh.boxes, [[20.0, 20.0, 32.0, 32.0]]);
     assert_eq!(sh.rules, [[40.0, 100.0, 240.0, 100.0], [60.0, 600.5, 260.0, 600.5]]);
 }
+
+#[test]
+fn arabic_field_values_are_drawn_with_an_embedded_font() {
+    let mut doc = fixture();
+    if pdfcraft_fonts::shaping::ShapingFace::arabic().is_none() {
+        eprintln!("skipping: built without the craft-fonts Arabic face (set CRAFT_FONTS_DIR)");
+        let before = write_incremental(&doc, &SaveOptions::default()).unwrap();
+        assert!(set_value(&mut doc, "name", &FieldValue::Text("سلام".into())).is_err());
+        assert_eq!(write_incremental(&doc, &SaveOptions::default()).unwrap(), before, "value and appearance unchanged");
+        return;
+    }
+    set_value(&mut doc, "name", &FieldValue::Text("محمد علي".into())).unwrap();
+    set_value(&mut doc, "notes", &FieldValue::Text("ملاحظة طويلة يجب أن تلتف على عدة أسطر داخل المربع".into())).unwrap();
+    let doc = reopen(&doc);
+    let all = fields(&doc);
+    assert_eq!(field(&all, "name").value, ["محمد علي"], "the value is stored as typed");
+    let name_ap = ap(&doc, &field(&all, "name").widgets[0]);
+    assert!(name_ap.contains("/Tx BMC") && name_ap.contains("/PCAr ") && name_ap.contains("> Tj") && !name_ap.contains("(?"), "{name_ap}");
+    let notes = ap(&doc, &field(&all, "notes").widgets[0]);
+    assert!(notes.matches(" Tm").count() >= 2, "wrapped onto several lines: {notes}");
+    // A value no font can show is refused; the field keeps its value and appearance.
+    let mut doc = doc;
+    let before = write_incremental(&doc, &SaveOptions::default()).unwrap();
+    let err = set_value(&mut doc, "name", &FieldValue::Text("محمد 日本".into())).unwrap_err().to_string();
+    assert!(err.contains('日'), "{err}");
+    assert_eq!(write_incremental(&doc, &SaveOptions::default()).unwrap(), before);
+    assert_eq!(field(&fields(&doc), "name").value, ["محمد علي"]);
+}

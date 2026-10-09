@@ -378,6 +378,10 @@ fn widget_dict(page: ObjRef, rect: [f64; 4]) -> Dict {
 
 /// Add a field on `page` (0-based) in `rect` (user space). Returns its full name.
 pub fn add_field(doc: &mut Document, page: usize, rect: [f64; 4], kind: &NewField, name: Option<&str>) -> Result<String, FormError> {
+    crate::atomic(doc, |doc| add_field_inner(doc, page, rect, kind, name))
+}
+
+fn add_field_inner(doc: &mut Document, page: usize, rect: [f64; 4], kind: &NewField, name: Option<&str>) -> Result<String, FormError> {
     let pages = page_refs(doc);
     let page_ref = *pages.get(page).ok_or_else(|| FormError::Invalid(format!("page {} does not exist", page + 1)))?;
     let rect = [rect[0].min(rect[2]), rect[1].min(rect[3]), rect[0].max(rect[2]), rect[1].max(rect[3])];
@@ -540,11 +544,15 @@ pub fn add_field(doc: &mut Document, page: usize, rect: [f64; 4], kind: &NewFiel
 
 /// Regenerate every widget appearance of a field from its current value and settings.
 pub fn redraw_field(doc: &mut Document, name: &str) -> Result<(), FormError> {
+    crate::atomic(doc, |doc| redraw_field_inner(doc, name))
+}
+
+fn redraw_field_inner(doc: &mut Document, name: &str) -> Result<(), FormError> {
     let f = fields(doc).into_iter().find(|f| f.name == name).ok_or_else(|| FormError::NoSuchField(name.into()))?;
     for w in &f.widgets {
         let ap = match f.kind {
             FieldKind::Text | FieldKind::Combo | FieldKind::List => {
-                let s = appearance::field_appearance(doc, &f, w, &f.value);
+                let s = appearance::widget_appearance(doc, &f, w, &f.value, true).map_err(FormError::Invalid)?;
                 let r = doc.add(Object::Stream(s));
                 let mut d = Dict::new();
                 d.set(b"N".to_vec(), Object::Ref(r));
@@ -682,6 +690,10 @@ fn empty_box(doc: &Document, w: &Widget) -> Stream {
 
 /// Change a field's properties (General and Options tabs) and redraw it.
 pub fn set_props(doc: &mut Document, name: &str, props: &FieldProps) -> Result<String, FormError> {
+    crate::atomic(doc, |doc| set_props_inner(doc, name, props))
+}
+
+fn set_props_inner(doc: &mut Document, name: &str, props: &FieldProps) -> Result<String, FormError> {
     let all = fields(doc);
     let f = all.iter().find(|f| f.name == name).ok_or_else(|| FormError::NoSuchField(name.into()))?.clone();
     // A locked field only takes unlocking (Acrobat greys its properties out).
@@ -1004,6 +1016,10 @@ const WIDGET_KEYS: [&[u8]; 12] = [b"Type", b"Subtype", b"Rect", b"P", b"AP", b"A
 /// A field that is its own widget is first split into a field and a widget kid. Returns how
 /// many widgets were added (pages that already have one are skipped).
 pub fn duplicate_field(doc: &mut Document, name: &str, pages: &[usize]) -> Result<usize, FormError> {
+    crate::atomic(doc, |doc| duplicate_field_inner(doc, name, pages))
+}
+
+fn duplicate_field_inner(doc: &mut Document, name: &str, pages: &[usize]) -> Result<usize, FormError> {
     let f = fields(doc).into_iter().find(|f| f.name == name).ok_or_else(|| FormError::NoSuchField(name.into()))?;
     let model = f.widgets.first().cloned().ok_or_else(|| FormError::Invalid(format!("{name} has no widget")))?;
     let refs = page_refs(doc);

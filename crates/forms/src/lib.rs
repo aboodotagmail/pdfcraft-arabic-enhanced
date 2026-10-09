@@ -676,6 +676,10 @@ pub fn set_value(doc: &mut Document, name: &str, value: &FieldValue) -> Result<(
 
 /// [`set_value`], running the fields' JavaScript through `scripts`.
 pub fn set_value_with(doc: &mut Document, name: &str, value: &FieldValue, scripts: &mut dyn Scripts) -> Result<(), FormError> {
+    crate::atomic(doc, |doc| set_value_with_inner(doc, name, value, scripts))
+}
+
+fn set_value_with_inner(doc: &mut Document, name: &str, value: &FieldValue, scripts: &mut dyn Scripts) -> Result<(), FormError> {
     let all = fields(doc);
     if all.is_empty() {
         return Err(FormError::NoForm);
@@ -697,6 +701,10 @@ pub fn recalculate(doc: &mut Document) -> Result<usize, FormError> {
 
 /// [`recalculate`], running custom Calculate (and Format) scripts through `scripts`.
 pub fn recalculate_with(doc: &mut Document, scripts: &mut dyn Scripts) -> Result<usize, FormError> {
+    crate::atomic(doc, |doc| recalculate_with_inner(doc, scripts))
+}
+
+fn recalculate_with_inner(doc: &mut Document, scripts: &mut dyn Scripts) -> Result<usize, FormError> {
     let all = fields(doc);
     let calculated = |f: &Field| f.actions.calculate != af::Calculate::None || f.actions.scripts.calculate.is_some();
     if !all.iter().any(calculated) {
@@ -888,9 +896,10 @@ fn redraw(doc: &mut Document, f: &Field, values: &[String], scripts: &mut dyn Sc
     };
     for w in &f.widgets {
         let stream = match &shown {
-            Some(s) => appearance::field_appearance_as(doc, f, w, std::slice::from_ref(s), false),
-            None => appearance::field_appearance(doc, f, w, values),
-        };
+            Some(s) => appearance::widget_appearance(doc, f, w, std::slice::from_ref(s), false),
+            None => appearance::widget_appearance(doc, f, w, values, true),
+        }
+        .map_err(FormError::Invalid)?;
         let ap = doc.add(Object::Stream(stream));
         let mut apd = Dict::new();
         apd.set(b"N".to_vec(), Object::Ref(ap));
@@ -902,8 +911,24 @@ fn redraw(doc: &mut Document, f: &Field, values: &[String], scripts: &mut dyn Sc
     Ok(())
 }
 
+/// Run an edit all or nothing: on error the document is exactly as it was (a value whose text
+/// can't be drawn, say Arabic without the Arabic font, never leaves `/V` and the appearance
+/// disagreeing).
+pub(crate) fn atomic<T>(doc: &mut Document, f: impl FnOnce(&mut Document) -> Result<T, FormError>) -> Result<T, FormError> {
+    let before = doc.clone();
+    let result = f(doc);
+    if result.is_err() {
+        *doc = before;
+    }
+    result
+}
+
 /// Acrobat's Clear form: every field (or the named ones) back to its default value.
 pub fn reset(doc: &mut Document, names: Option<&[String]>) -> Result<usize, FormError> {
+    crate::atomic(doc, |doc| reset_inner(doc, names))
+}
+
+fn reset_inner(doc: &mut Document, names: Option<&[String]>) -> Result<usize, FormError> {
     let all = fields(doc);
     if all.is_empty() {
         return Err(FormError::NoForm);
