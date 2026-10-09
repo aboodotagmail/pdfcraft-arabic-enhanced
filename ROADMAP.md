@@ -18,7 +18,7 @@ with a green, pushed commit on the working branch.
 |---|---|---|
 | 0 | Fork identity (no ArtCraft marks), own MSI identity, licence texts in the MSI, craft-fonts pin with Noto Sans Arabic (Noto CJK excluded), Windows x64 MSI workflow with install/launch/uninstall smoke test | done |
 | 1 | Shaping (harfrust) and paragraph bidi layout in `pdfcraft-fonts` | done |
-| 2 | Embedded TrueType subset (Type0/CIDFontType2, Identity-H), ToUnicode, ActualText | planned |
+| 2 | Embedded TrueType subset (Type0/CIDFontType2, Identity-H), ToUnicode, ActualText (optional, off: see log) | done |
 | 3 | Arabic in every place text is created (Add text, comments, forms, stamps, Create PDF) | planned |
 | 4 | Extraction, search and selection of Arabic (bidi order, presentation forms, Arabic-aware matching) | planned |
 | 5 | Editing existing Arabic text without corrupting it | planned |
@@ -29,6 +29,7 @@ with a green, pushed commit on the working branch.
 Log:
 - **2026-10-09 (Phase 0):** Fork identity: the ArtCraft logos, Discord and website links are gone from the app (About, home, top bar, Help menu, CLI), replaced by this repository's links and a plain-text "based on PdfCraft" line; the update check asks this repository. The MSI has its own name, publisher, UpgradeCode, component GUIDs, ProgID and context-menu verb, so it never replaces or collides with an upstream install, and it installs the licence texts (MIT, Apache-2.0, NOTICE, font OFL). craft-fonts is pinned to 8dcdacd for Noto Sans Arabic; `crates/fonts/build.rs` skips Noto CJK/Source Han faces (AGENTS.md §1.1). New workflow `windows-x64.yml` tests, packages, installs, launches (control-channel screenshot) and uninstalls the MSI.
 - **2026-10-09 (Phase 1):** `pdfcraft_fonts::shaping` shapes text with the face's own GSUB/GPOS through harfrust (joining forms, lam-alef, marks with their own clusters, kerning, bracket mirroring in RTL runs), returning clusters in drawing order with their logical text; a missing glyph is an error naming the character, never a box. `pdfcraft_fonts::layout` resolves UAX #9 levels once per paragraph, wraps at spaces (between characters, never before a mark, for over-long words), drops trailing spaces, and aligns start/left/center/right/justify. 33 tests, with and without craft-fonts.
+- **2026-10-09 (Phase 2):** `pdfcraft_fonts::embed` writes a Type0/CIDFontType2 font (Identity-H, CIDToGIDMap Identity, `/W`, CIDSet) whose FontFile2 is a subset of the face: one TrueType composite glyph per shaped cluster (letter with dots, lam-alef, mark), so each code has one exact ToUnicode entry; variation and layout tables are dropped (default instance), composites renumbered, checksums set. `pdfcraft_fonts::paint` draws laid-out lines as two-byte codes in visual order. Checked with qpdf --check, pdffonts (embedded CID TrueType subset with ToUnicode), fontTools (all 134 glyphs parse, draw and re-save), pdftotext (logical Arabic text with tashkeel, lam-alef and brackets, as good as or better than a Chromium-made reference) and mutool rendering against Chromium's rendering of the same text (identical shaping). Finding: /ActualText spans made pdftotext reverse each Arabic word (it spreads ActualText left to right), so they are off by default; the exact per-cluster ToUnicode carries the text, as in Chromium, Word and LibreOffice output.
 
 ## Estimate summary
 
