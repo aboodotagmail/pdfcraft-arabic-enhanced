@@ -393,113 +393,7 @@ fn normalize_presentation_forms(text: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
-/// The writing direction of a glyph's text, for line reordering.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Dir {
-    /// Right-to-left letters and their marks.
-    R,
-    /// Left-to-right letters.
-    L,
-    /// Digits (European and Arabic-Indic): always read left to right.
-    D,
-    /// Spaces and punctuation.
-    N,
-}
-
-fn dir_class(text: &str) -> Dir {
-    let digit = |c: char| c.is_ascii_digit() || matches!(c, '\u{0660}'..='\u{0669}' | '\u{06F0}'..='\u{06F9}');
-    if text.chars().any(digit) && !text.chars().any(|c| is_rtl(c) && !digit(c)) {
-        Dir::D
-    } else if text.chars().any(is_rtl) {
-        Dir::R
-    } else if text.chars().any(char::is_alphabetic) {
-        Dir::L
-    } else {
-        Dir::N
-    }
-}
-
-/// The logical order of a line drawn left to right (`classes` in drawing order): positions into
-/// it. The inverse of the Unicode bidi algorithm's display order for the two-level lines real
-/// documents have:
-/// - a line with more right-to-left letters than left-to-right ones reads right to left, its
-///   runs of Latin letters and numbers (with the spaces and punctuation between them) keeping
-///   their left-to-right order;
-/// - otherwise it reads left to right, each right-to-left run (letters with the spaces,
-///   punctuation and numbers between them) reversed, numbers inside it kept in order.
-fn visual_to_logical(classes: &[Dir]) -> Vec<usize> {
-    let n = classes.len();
-    let rtl = classes.iter().filter(|c| **c == Dir::R).count();
-    if rtl == 0 {
-        return (0..n).collect();
-    }
-    let ltr = classes.iter().filter(|c| **c == Dir::L).count();
-    let at = |i: usize| classes.get(i).copied().unwrap_or(Dir::N);
-    let mut out = Vec::with_capacity(n);
-    if rtl > ltr {
-        // Islands of L/D, possibly with neutrals inside, stay in drawing order; everything else
-        // is read from the right.
-        let mut units: Vec<std::ops::Range<usize>> = Vec::new();
-        let mut i = 0;
-        while i < n {
-            if matches!(at(i), Dir::L | Dir::D) {
-                let mut end = i + 1;
-                let mut j = i + 1;
-                while j < n && at(j) != Dir::R {
-                    if matches!(at(j), Dir::L | Dir::D) {
-                        end = j + 1;
-                    }
-                    j += 1;
-                }
-                units.push(i..end);
-                i = end;
-            } else {
-                units.push(i..i + 1);
-                i += 1;
-            }
-        }
-        for u in units.into_iter().rev() {
-            out.extend(u);
-        }
-    } else {
-        // Islands of R (with the neutrals and digits between R letters) are reversed, their
-        // digit runs kept in order.
-        let mut i = 0;
-        while i < n {
-            if at(i) != Dir::R {
-                out.push(i);
-                i += 1;
-                continue;
-            }
-            let mut end = i + 1;
-            let mut j = i + 1;
-            while j < n && at(j) != Dir::L {
-                if at(j) == Dir::R {
-                    end = j + 1;
-                }
-                j += 1;
-            }
-            // Reverse i..end, keeping runs of digits (with separators between digits) in order.
-            let mut k = end;
-            while k > i {
-                let last = k - 1;
-                if at(last) == Dir::D {
-                    let mut start = last;
-                    while start > i && (at(start - 1) == Dir::D || (at(start - 1) == Dir::N && start >= i + 2 && at(start - 2) == Dir::D)) {
-                        start -= 1;
-                    }
-                    out.extend(start..k);
-                    k = start;
-                } else {
-                    out.push(last);
-                    k = last;
-                }
-            }
-            i = end;
-        }
-    }
-    out
-}
+use pdfcraft_fonts::layout::read_line;
 
 fn is_rtl(c: char) -> bool {
     matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF)
@@ -661,6 +555,9 @@ pub fn layout(glyphs: Vec<TextGlyph>) -> PageText {
         block_order.push(pick);
     }
 
+    // The page's text extent, for lines alone in their block.
+    let text_left = glyphs.iter().map(|g| g.rect[0]).fold(f32::INFINITY, f32::min);
+    let text_right = glyphs.iter().map(|g| g.rect[2]).fold(f32::NEG_INFINITY, f32::max);
     // 4. Emit glyphs in reading order with line numbers and word gaps.
     let mut order: Vec<usize> = Vec::with_capacity(n);
     let mut line_of = Vec::with_capacity(n);
@@ -685,9 +582,15 @@ pub fn layout(glyphs: Vec<TextGlyph>) -> PageText {
                 let tight_cluster = (pt.chars().any(is_complex) || ct.chars().any(is_complex)) && gap < s.h * 0.6;
                 gap_before[w + 1] = gap > threshold && !cjk && !tight_cluster && !pt.trim().is_empty() && !ct.trim().is_empty();
             }
-            // Logical order (right-to-left runs read from the right), as positions in drawing order.
-            let classes: Vec<Dir> = s.idx.iter().map(|i| dir_class(&glyphs[*i].text)).collect();
-            let perm = visual_to_logical(&classes);
+            // Logical order (UAX #9; see `read_line`), as positions in drawing order. Where both
+            // directions read the same, the line's place decides: flush with its block's right
+            // edge (or, alone, nearer the right of the page's text) reads right to left.
+            let bb = blocks[b].1;
+            let (left_gap, right_gap) =
+                if blocks[b].0.len() > 1 { (s.bbox[0] - bb[0], bb[2] - s.bbox[2]) } else { (s.bbox[0] - text_left, text_right - s.bbox[2]) };
+            let hint = if (left_gap - right_gap).abs() > s.h { Some(right_gap < left_gap) } else { None };
+            let texts: Vec<&str> = s.idx.iter().map(|i| glyphs[*i].text.as_str()).collect();
+            let perm = read_line(&texts, None, hint).order;
             let idx: Vec<usize> = perm.iter().filter_map(|k| s.idx.get(*k).copied()).collect();
             // A word break precedes a glyph when one lies between it and the glyph before it in
             // drawing order.
@@ -868,20 +771,47 @@ mod tests {
         // "مرحبا بالعالم" drawn: the last word leftmost, each word's letters from its end.
         let t = layout(drawn(&[("ملاعلاب", 0.0), ("ابحرم", 0.5)]));
         assert_eq!(t.plain_text(), "مرحبا بالعالم");
-        // "بسم الله — رقم 123 ABC" (an Arabic paragraph) is drawn "ABC 123 مقر — هللا مسب".
-        let t = layout(drawn(&[("ABC", 0.0), ("123", 0.5), ("مقر", 0.5), ("—", 0.5), ("هللا", 0.5), ("مسب", 0.5)]));
-        assert_eq!(t.plain_text(), "بسم الله — رقم ABC 123", "the Latin and number run keeps its order");
+        // "بسم الله — رقم 123 ABC" (an Arabic paragraph) is drawn "ABC 123 مقر — هللا مسب", and so
+        // is "بسم الله — رقم ABC 123" (digits after Latin take its direction, UAX #9 W7): either
+        // reading, right to left, with the Latin and the number each in order.
+        let parts = [("ABC", 0.0), ("123", 0.5), ("مقر", 0.5), ("—", 0.5), ("هللا", 0.5), ("مسب", 0.5)];
+        let t = layout(drawn(&parts));
+        assert!(["بسم الله — رقم 123 ABC", "بسم الله — رقم ABC 123"].contains(&t.plain_text().as_str()), "{}", t.plain_text());
+        assert!(displays_as(&t.plain_text(), true, &parts));
         // Arabic-Indic digits and parentheses inside Arabic.
         let t = layout(drawn(&[("١٢٣", 0.0), ("ددعلا", 0.5), (")ةبرجت(", 0.5)]));
         assert_eq!(t.plain_text(), "(تجربة) العدد ١٢٣");
         // An Arabic word inside an English sentence.
         let t = layout(drawn(&[("The", 0.0), ("word", 0.5), ("مالس", 0.5), ("means", 0.5), ("peace.", 0.5)]));
         assert_eq!(t.plain_text(), "The word سلام means peace.");
-        // A number between Latin and Arabic in an English line is drawn the same whether it
-        // belongs to the Arabic ("Total: عام 2026") or the Latin ("Total: 2026 عام"); it is read
-        // with the Latin, its digits in order.
-        let t = layout(drawn(&[("Total:", 0.0), ("2026", 0.5), ("ماع", 0.5)]));
-        assert_eq!(t.plain_text(), "Total: 2026 عام");
+        // "Total: 2026 ماع" is drawn by UAX #9 from "Total: عام 2026" and "Total: 2026 عام" in a
+        // left-to-right paragraph and from "عام 2026 :Total" in a right-to-left one. Alone, the
+        // line is read one of these ways, its digits in order.
+        let parts = [("Total:", 0.0), ("2026", 0.5), ("ماع", 0.5)];
+        let t = layout(drawn(&parts));
+        let text = t.plain_text();
+        assert!(displays_as(&text, true, &parts) || displays_as(&text, false, &parts), "{text}");
+        assert!(text.contains("2026") && text.contains("Total") && text.contains("عام"), "{text}");
+        // Flush left under a longer English line, its place says left to right.
+        let mut glyphs = drawn(&parts);
+        for (i, c) in "The quarterly report is attached below".chars().enumerate() {
+            let x = 10.0 + 6.0 * i as f32;
+            glyphs.push(TextGlyph { text: c.to_string(), rect: [x, 30.0, x + 6.0, 40.0] });
+        }
+        let t = layout(glyphs);
+        let first = t.plain_text().lines().map(str::to_owned).find(|l| l.contains("Total")).unwrap_or_default();
+        assert!(["Total: عام 2026", "Total: 2026 عام"].contains(&first.as_str()), "{first}");
+        assert!(displays_as(&first, false, &parts));
+    }
+
+    /// Whether logical `text`, laid out by UAX #9 in a paragraph of direction `rtl`, is drawn as
+    /// `parts` (left to right, word gaps as spaces).
+    fn displays_as(text: &str, rtl: bool, parts: &[(&str, f32)]) -> bool {
+        let units: Vec<String> = text.chars().map(String::from).collect();
+        let refs: Vec<&str> = units.iter().map(String::as_str).collect();
+        let shown: String = pdfcraft_fonts::layout::uax9_display_order(&refs, rtl).iter().filter_map(|i| refs.get(*i).copied()).collect();
+        let expected = parts.iter().map(|(t, _)| *t).collect::<Vec<_>>().join(" ");
+        shown == expected
     }
 
     #[test]
@@ -910,27 +840,6 @@ mod tests {
         let page = layout(drawn(&[("ـــمالسإ", 0.0)]));
         assert_eq!(page.find("اسلام").len(), 1, "hamza forms and tatweel");
         assert!(page.find("كتاب").is_empty());
-    }
-
-    #[test]
-    fn visual_to_logical_permutations() {
-        use Dir::*;
-        assert_eq!(visual_to_logical(&[L, L, N, L]), [0, 1, 2, 3]);
-        assert_eq!(visual_to_logical(&[R, R, N, R]), [3, 2, 1, 0]);
-        // RTL line: an LTR island keeps its order.
-        assert_eq!(visual_to_logical(&[L, N, D, N, R, R]), [5, 4, 3, 0, 1, 2]);
-        // LTR line: an RTL island is reversed, its digits kept in order.
-        assert_eq!(visual_to_logical(&[L, L, N, R, N, D, D, N, R]), [0, 1, 2, 8, 7, 5, 6, 4, 3]);
-        assert!(visual_to_logical(&[]).is_empty());
-        for n in 0..40 {
-            for seed in 0..20u32 {
-                let classes: Vec<Dir> =
-                    (0..n).map(|i| [R, L, D, N][((i as u32).wrapping_mul(2_654_435_761).wrapping_add(seed) >> 7) as usize % 4]).collect();
-                let mut p = visual_to_logical(&classes);
-                p.sort_unstable();
-                assert_eq!(p, (0..n).collect::<Vec<_>>(), "a permutation");
-            }
-        }
     }
 
     /// Two lines, "ab cd" and "e fg": words stop at blank glyphs, word gaps and line ends.

@@ -38,6 +38,15 @@ pub struct TextLine {
     /// Whether new text in this font can only be shown by substituting another font (no
     /// Unicode mapping for the line, so nothing could be reused).
     pub decodable: bool,
+    /// Whether the line reads right to left (its paragraph direction, per UAX #9; see
+    /// `pdfcraft_fonts::layout::read_line`).
+    pub rtl: bool,
+    /// Whether the reading (`text` and `rtl`) follows from the drawing alone; `false` when UAX #9
+    /// allows another text or direction to be drawn the same way and the line's position on the
+    /// page (or the right-to-left default) chose.
+    pub direction_certain: bool,
+    /// Each code's text and where it starts (user space), in content order.
+    pub(crate) units: Vec<(String, f64)>,
     stream: usize,
     ops: Vec<usize>,
     /// Where the line starts: text matrix (text space), the state there, and its `BT`.
@@ -234,6 +243,8 @@ struct Shown {
     bt_op: usize,
     bt_state: Ts,
     text: String,
+    /// Each code's text with where it starts along the baseline (user space), in content order.
+    pub(crate) units: Vec<(String, f64)>,
     rect: [f64; 4],
     baseline: f64,
     start_x: f64,
@@ -360,6 +371,7 @@ fn interpret(doc: &Document, ops: &[Op], fonts_res: &Dict, cache: &mut HashMap<V
                 let trm0 = tm.then(&ts.ctm);
                 let start = trm0.apply(0.0, ts.rise);
                 let mut text = String::new();
+                let mut units: Vec<(String, f64)> = Vec::new();
                 let mut decodable = true;
                 let mut x_text = 0.0;
                 for p in &pieces {
@@ -367,7 +379,10 @@ fn interpret(doc: &Document, ops: &[Op], fonts_res: &Dict, cache: &mut HashMap<V
                         Object::String(s) => {
                             for (code, len) in m.codes(&s.bytes) {
                                 match m.text_of(code) {
-                                    Some(t) => text.push_str(t),
+                                    Some(t) => {
+                                        text.push_str(t);
+                                        units.push((t.to_string(), trm0.apply(x_text, ts.rise).0));
+                                    }
                                     None => decodable = false,
                                 }
                                 let w = m.width(code) * ts.size + ts.char_spacing + if m.is_space(code, len) { ts.word_spacing } else { 0.0 };
@@ -380,6 +395,7 @@ fn interpret(doc: &Document, ops: &[Op], fonts_res: &Dict, cache: &mut HashMap<V
                                 // A large gap inside TJ reads as a space.
                                 if dx > ts.size * 0.2 && !text.ends_with(' ') {
                                     text.push(' ');
+                                    units.push((" ".to_string(), trm0.apply(x_text, ts.rise).0));
                                 }
                                 x_text += dx;
                             }
@@ -407,6 +423,7 @@ fn interpret(doc: &Document, ops: &[Op], fonts_res: &Dict, cache: &mut HashMap<V
                     bt_op: at_bt.0,
                     bt_state: at_bt.1.clone(),
                     text,
+                    units,
                     rect,
                     baseline: start.1,
                     start_x: start.0,
@@ -455,8 +472,10 @@ pub fn text_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditErro
                 let gap = s.start_x - last.map_or(s.start_x, |x| x.2);
                 if gap > l.size * 0.2 && !l.text.ends_with(' ') && !s.text.starts_with(' ') {
                     l.text.push(' ');
+                    l.units.push((" ".to_string(), last.map_or(s.start_x, |x| x.2)));
                 }
                 l.text.push_str(&s.text);
+                l.units.extend(s.units.iter().cloned());
                 l.rect = [l.rect[0].min(s.rect[0]), l.rect[1].min(s.rect[1]), l.rect[2].max(s.rect[2]), l.rect[3].max(s.rect[3])];
                 l.ops.push(s.op);
                 l.decodable &= s.decodable;
@@ -472,6 +491,9 @@ pub fn text_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditErro
                     italic: s.italic,
                     color: fill_color(&s.state.fill),
                     decodable: s.decodable,
+                    rtl: false,
+                    direction_certain: true,
+                    units: s.units.clone(),
                     stream: si,
                     ops: vec![s.op],
                     origin: Origin {
@@ -492,7 +514,101 @@ pub fn text_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditErro
     }
     // Lines of only spaces aren't editable text.
     lines.retain(|l| !l.text.trim().is_empty());
+    let crop = p.crop(doc);
+    for l in &mut lines {
+        logical_order(l, crop);
+    }
     Ok(lines)
+}
+
+/// Right-to-left text is drawn in visual order: put a line's text in reading (logical) order,
+/// from its codes' positions along the baseline, per UAX #9 (`read_line`). Where both
+/// directions show the line the same way, its place on the page (`crop`) decides: nearer the
+/// right edge reads right to left. Lines without right-to-left letters are left as they are.
+fn logical_order(l: &mut TextLine, crop: [f64; 4]) {
+    if !l.units.iter().any(|(t, _)| t.chars().any(pdfcraft_fonts::shaping::is_rtl_char)) {
+        return;
+    }
+    let mut units = l.units.clone();
+    // Drawing order, left to right (stable: codes drawn at one place keep their order).
+    units.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let (left_gap, right_gap) = (l.rect[0] - crop[0], crop[2] - l.rect[2]);
+    let hint = if (left_gap - right_gap).abs() > l.size { Some(right_gap < left_gap) } else { None };
+    let texts: Vec<&str> = units.iter().map(|(t, _)| t.as_str()).collect();
+    let reading = pdfcraft_fonts::layout::read_line(&texts, None, hint);
+    l.rtl = reading.rtl;
+    l.direction_certain = !reading.ambiguous;
+    l.text = reading.order.iter().filter_map(|i| texts.get(*i).copied()).collect();
+}
+
+/// The paragraph direction an edited line keeps: the one it was read in. The line's text, laid
+/// out again in that direction, is drawn as it was, so what the user leaves alone stays where
+/// it was even when the direction came from the line's position (`direction_certain` false).
+fn known_direction(line: &TextLine) -> pdfcraft_fonts::layout::BaseDirection {
+    use pdfcraft_fonts::layout::BaseDirection;
+    if line.rtl { BaseDirection::Rtl } else { BaseDirection::Ltr }
+}
+
+/// Whether `text` must be shaped and laid out right to left by PdfCraft rather than encoded in
+/// an existing font: it has right-to-left letters (Arabic, Hebrew). Reusing the line's font code
+/// by code would give each letter one fixed form in typed order, i.e. disjoined and mirrored.
+fn needs_shaping(text: &str) -> bool {
+    text.chars().any(pdfcraft_fonts::shaping::is_rtl_char)
+}
+
+/// Operators that show `text` shaped (joined, right to left where it is) in an embedded subset
+/// of the Arabic face, in place of a line's first text operator, at the line's text-space font
+/// size `size` (`k`: text space → user space). Character and word spacing and horizontal
+/// scaling are set to neutral around it (spacing letters apart would break their joins) and put
+/// back after; a right-to-left line keeps its right edge. Returns the operators, the font's
+/// resource name and a description of the font used.
+fn shaped_line_ops(
+    doc: &mut Document,
+    fonts_res: &mut Dict,
+    text: &str,
+    size: f64,
+    k: f64,
+    target: &TextLine,
+) -> Result<(Vec<Op>, String, String), EditError> {
+    let err = |e: pdfcraft_fonts::paint::TextError| EditError::Invalid(format!("\"{text}\" can't be shown: {e}"));
+    let mut u = pdfcraft_fonts::paint::UnicodeLines::new().map_err(err)?;
+    let user_size = size * k;
+    let (line, width) = u.line_in(text, user_size, known_direction(target)).map_err(err)?;
+    let mut codes: Vec<u16> = Vec::new();
+    for c in line.runs.iter().flat_map(|r| r.clusters.iter()) {
+        codes.push(u.code(c).map_err(err)?);
+    }
+    let bytes: Vec<u8> = codes.iter().flat_map(|c| c.to_be_bytes()).collect();
+    let font = u.write(doc).map_err(err)?;
+    let mut name = String::from("PCUni");
+    let mut suffix = 0u32;
+    while fonts_res.contains(name.as_bytes()) {
+        suffix = suffix.saturating_add(1);
+        name = format!("PCUni{suffix}");
+    }
+    fonts_res.set(name.clone().into_bytes(), Object::Ref(font));
+    let n = pdfcraft_content::num;
+    let st = &target.origin.state;
+    // Right edge kept for right-to-left lines: start further right (or left) by the difference.
+    let shift = if line.rtl { ((target.rect[2] - target.rect[0]) - width) / k } else { 0.0 };
+    let mut out = Vec::new();
+    if shift != 0.0 && shift.is_finite() {
+        out.push(Op::new("Td", vec![n(shift), n(0.0)]));
+    }
+    out.push(Op::new("Tc", vec![n(0.0)]));
+    out.push(Op::new("Tw", vec![n(0.0)]));
+    out.push(Op::new("Tz", vec![n(100.0)]));
+    out.push(Op::new("Tf", vec![Object::name(&name), n(size)]));
+    out.push(Op::new("Tj", vec![Object::String(PdfString { bytes, hex: true })]));
+    out.push(Op::new("Tf", vec![Object::name(&target.font), n(size)]));
+    out.push(Op::new("Tc", vec![n(st.char_spacing)]));
+    out.push(Op::new("Tw", vec![n(st.word_spacing)]));
+    out.push(Op::new("Tz", vec![n(st.scale * 100.0)]));
+    if shift != 0.0 && shift.is_finite() {
+        out.push(Op::new("Td", vec![n(-shift), n(0.0)]));
+    }
+    let family = pdfcraft_fonts::shaping::ShapingFace::arabic().map_or_else(|| "Arabic".to_string(), |f| f.name().to_string());
+    Ok((out, name, family))
 }
 
 /// Text → the bytes that show it in the chosen font.
@@ -652,6 +768,10 @@ fn type3_encode(fallback: &Type3Fallback, text: &str) -> Option<Vec<u8>> {
 
 /// Replace the text of line `line` (an index into [`text_lines`]) on `page` with `text`.
 pub fn replace_line(doc: &mut Document, page: usize, line: usize, text: &str) -> Result<LineEdit, EditError> {
+    crate::atomic(doc, |doc| replace_line_inner(doc, page, line, text))
+}
+
+fn replace_line_inner(doc: &mut Document, page: usize, line: usize, text: &str) -> Result<LineEdit, EditError> {
     let text = text.replace(['\n', '\r'], " ");
     let lines = text_lines(doc, page)?;
     let target = lines.get(line).cloned().ok_or_else(|| EditError::Invalid(format!("page {} has no line {}", page + 1, line + 1)))?;
@@ -664,7 +784,8 @@ pub fn replace_line(doc: &mut Document, page: usize, line: usize, text: &str) ->
     let first = target.ops[0];
     // The line's own font, when it can show every character.
     let font = fonts_res.get(target.font.as_bytes()).and_then(|f| doc.resolve(f).as_dict().cloned()).map(|d| Metrics::from_dict(doc, &d));
-    let reused = font.as_ref().and_then(|m| m.encode(&text));
+    // Right-to-left text is never re-encoded code by code in the line's font (see `needs_shaping`).
+    let reused = if needs_shaping(&text) { None } else { font.as_ref().and_then(|m| m.encode(&text)) };
     let mut substituted = None;
     let mut replacement: Vec<Op> = Vec::new();
     // ' and " also move to the next line; keep that.
@@ -680,7 +801,14 @@ pub fn replace_line(doc: &mut Document, page: usize, line: usize, text: &str) ->
     match reused {
         Some(bytes) => replacement.push(Op::new("Tj", vec![Object::String(PdfString::literal(bytes))])),
         None => {
-            if needs_type3(&text) {
+            if needs_shaping(&text) {
+                let size = font_size_before(&ops, first).unwrap_or(target.size);
+                let k = target.origin.k.max(1e-6);
+                let (ops_new, name, family) = shaped_line_ops(doc, &mut fonts_res, &text, size, k, &target)?;
+                replacement.extend(ops_new);
+                let _ = name;
+                substituted = Some(family);
+            } else if needs_type3(&text) {
                 let fallback = type3_font(doc, &mut fonts_res, &text, source_family(&target.base_font), target.bold)?;
                 let bytes = type3_encode(&fallback, &text)
                     .ok_or_else(|| EditError::Invalid(format!("\"{text}\" can't be shown by the Japanese fallback")))?;
@@ -890,6 +1018,10 @@ pub struct BlockStyle {
 
 /// Rewrite paragraph `block` with new text (or its own) and formatting, rewrapped to its width.
 pub fn rewrite_block(doc: &mut Document, page: usize, block: usize, text: Option<&str>, style: &BlockStyle) -> Result<LineEdit, EditError> {
+    crate::atomic(doc, |doc| rewrite_block_inner(doc, page, block, text, style))
+}
+
+fn rewrite_block_inner(doc: &mut Document, page: usize, block: usize, text: Option<&str>, style: &BlockStyle) -> Result<LineEdit, EditError> {
     let lines = text_lines(doc, page)?;
     let blocks = group_blocks(&lines);
     let b = blocks.get(block).cloned().ok_or_else(|| EditError::Invalid(format!("page {} has no paragraph {}", page + 1, block + 1)))?;
@@ -917,11 +1049,13 @@ pub fn rewrite_block(doc: &mut Document, page: usize, block: usize, text: Option
     }
     let o_state = ts_state.clone();
     let metrics = fonts_res.get(font_name.as_bytes()).and_then(|f| doc.resolve(f).as_dict().cloned()).map(|d| Metrics::from_dict(doc, &d));
-    let reuse = style.family.is_none() && style.bold.is_none() && metrics.as_ref().is_some_and(|m| m.encode(&text).is_some());
+    // Right-to-left text is shaped and laid out by PdfCraft in an embedded font (`needs_shaping`).
+    let shaped = needs_shaping(&text);
+    let reuse = !shaped && style.family.is_none() && style.bold.is_none() && metrics.as_ref().is_some_and(|m| m.encode(&text).is_some());
     // The chosen style also determines the real Japanese fallback outlines and advances.
     let (family, bold, italic) = style.family.unwrap_or((source_family(&b.base_font), b.bold, b.italic));
     let bold = style.bold.unwrap_or(bold);
-    let type3 = if !reuse && needs_type3(&text) { Some(type3_font(doc, &mut fonts_res, &text, family, bold)?) } else { None };
+    let type3 = if !reuse && !shaped && needs_type3(&text) { Some(type3_font(doc, &mut fonts_res, &text, family, bold)?) } else { None };
     let std_width = move |s: &str, size: f64| -> f64 {
         match family {
             crate::added::Family::Courier => s.chars().count() as f64 * 0.6 * size,
@@ -961,10 +1095,47 @@ pub fn rewrite_block(doc: &mut Document, page: usize, block: usize, text: Option
         };
         t * o_state.scale * k
     };
-    let wrapped = wrap(&text, width + 0.5, advance);
+    // Shaped paragraphs: laid out (bidi, joining, wrapping by shaped widths) in user space; each
+    // line's codes, its start offset and width in text space.
+    let mut shaped_lines: Vec<(Vec<u8>, f64, f64)> = Vec::new();
+    let mut shaped_font: Option<(String, String)> = None;
+    if shaped {
+        use pdfcraft_fonts::layout::LineAlign;
+        let err = |e: pdfcraft_fonts::paint::TextError| EditError::Invalid(format!("\"{text}\" can't be shown: {e}"));
+        let mut u = pdfcraft_fonts::paint::UnicodeLines::new().map_err(err)?;
+        let align = match style.align {
+            Some(crate::added::Align::Center) => LineAlign::Center,
+            Some(crate::added::Align::Right) => LineAlign::Right,
+            Some(crate::added::Align::Justify) => LineAlign::Justify,
+            _ => LineAlign::Start,
+        };
+        let user_size = size * k;
+        let to_user = user_size / f64::from(u.units_per_em().max(1));
+        for line in u.paragraph(&text, user_size, width, known_direction(first), align).map_err(err)? {
+            let mut bytes = Vec::new();
+            for c in line.runs.iter().flat_map(|r| r.clusters.iter()) {
+                bytes.extend(u.code(c).map_err(err)?.to_be_bytes());
+            }
+            shaped_lines.push((bytes, line.x as f64 * to_user / k, line.advance() as f64 * to_user / k));
+        }
+        let font = u.write(doc).map_err(err)?;
+        let mut name = String::from("PCUni");
+        let mut suffix = 0u32;
+        while fonts_res.contains(name.as_bytes()) {
+            suffix = suffix.saturating_add(1);
+            name = format!("PCUni{suffix}");
+        }
+        fonts_res.set(name.clone().into_bytes(), Object::Ref(font));
+        let family = pdfcraft_fonts::shaping::ShapingFace::arabic().map_or_else(|| "Arabic".to_string(), |f| f.name().to_string());
+        shaped_font = Some((name, family));
+    }
+    let wrapped = if shaped { vec![String::new(); shaped_lines.len()] } else { wrap(&text, width + 0.5, advance) };
     let mut substituted = None;
     let new_font = !reuse;
-    let (show_font, encode): (String, Encoder) = if let Some(m) = metrics.clone().filter(|_| reuse) {
+    let (show_font, encode): (String, Encoder) = if let Some((name, family)) = shaped_font.clone() {
+        substituted = Some(family);
+        (name, Box::new(|_: &str| None))
+    } else if let Some(m) = metrics.clone().filter(|_| reuse) {
         (font_name.clone(), Box::new(move |s: &str| m.encode(s)))
     } else if let Some(fallback) = type3.clone() {
         let name = fallback.name.clone();
@@ -1013,6 +1184,11 @@ pub fn rewrite_block(doc: &mut Document, page: usize, block: usize, text: Option
     block_ops.push(Op::new("BT", vec![]));
     let mut state = o_state.clone();
     state.word_spacing = 0.0;
+    if shaped {
+        // Spacing letters apart would break their joins.
+        state.char_spacing = 0.0;
+        state.scale = 1.0;
+    }
     state.font = Some((show_font, size));
     if let Some([r, g, bl]) = style.color {
         state.fill = vec![Op::new("rg", vec![n(r), n(g), n(bl)])];
@@ -1034,7 +1210,15 @@ pub fn rewrite_block(doc: &mut Document, page: usize, block: usize, text: Option
     let mut x = 0.0;
     let mut tw_set = 0.0;
     let mut underlines: Vec<(f64, f64, f64)> = Vec::new(); // (x0, x1, y) in text space
-    for (i, line) in wrapped.iter().enumerate() {
+    for (i, (bytes, sx, sw)) in shaped_lines.iter().enumerate() {
+        if i > 0 || *sx != 0.0 {
+            block_ops.push(Op::new("Td", vec![n(sx - x), n(if i > 0 { -lead } else { 0.0 })]));
+        }
+        x = *sx;
+        block_ops.push(Op::new("Tj", vec![Object::String(PdfString { bytes: bytes.clone(), hex: true })]));
+        underlines.push((*sx, sx + sw, -(i as f64) * lead - size * 0.12));
+    }
+    for (i, line) in wrapped.iter().enumerate().filter(|_| !shaped) {
         let dx = offset(line);
         if i > 0 || dx != 0.0 {
             block_ops.push(Op::new("Td", vec![n(dx - x), n(if i > 0 { -lead } else { 0.0 })]));

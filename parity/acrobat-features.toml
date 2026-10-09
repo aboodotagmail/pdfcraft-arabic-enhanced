@@ -1959,11 +1959,11 @@ title = "Edit right-to-left and CJK text"
 area = "C"
 tier = "P1"
 milestone = "M7"
-status = "planned"
+status = "partial"
 commands = []
 tools = []
-evidence = []
-notes = ""
+evidence = ["crates/edit/src/tests.rs::existing_arabic_lines_read_in_logical_order_and_are_replaced_shaped", "crates/edit/src/tests.rs::existing_arabic_paragraphs_are_rewritten_shaped_and_wrapped", "crates/edit/src/tests.rs::arabic_edits_that_cannot_be_shown_change_nothing", "crates/fonts/src/layout.rs::readings_are_the_ones_uax9_allows"]
+notes = "Arabic lines and paragraphs are read in logical order per UAX #9 (ambiguous drawings flagged) and replaced shaped in an embedded Noto Sans Arabic subset, keeping the read direction and right edge; refused edits change nothing. Missing: reusing the document's own Arabic font, Hebrew-specific checks, vertical CJK editing, Acrobat comparison."
 
 [[feature]]
 id = "edit.rotated-text-editing"

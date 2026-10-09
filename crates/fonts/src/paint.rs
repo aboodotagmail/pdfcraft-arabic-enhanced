@@ -78,8 +78,13 @@ impl UnicodeLines {
     /// `text` laid out as one line (paragraph separators start more lines; only the first is
     /// returned), with its width in points at `size`.
     pub fn line(&self, text: &str, size: f64) -> Result<(LaidLine, f64), TextError> {
+        self.line_in(text, size, BaseDirection::Auto)
+    }
+
+    /// [`UnicodeLines::line`] in a paragraph of the given direction (`Auto`: UAX #9 P2–P3).
+    pub fn line_in(&self, text: &str, size: f64, direction: BaseDirection) -> Result<(LaidLine, f64), TextError> {
         let face = self.subset.face();
-        let mut lines = layout_points(face, text, size, 1e7, BaseDirection::Auto, LineAlign::Left)?;
+        let mut lines = layout_points(face, text, size, 1e7, direction, LineAlign::Left)?;
         let mut line = if lines.is_empty() { return Err(TextError::Shape(ShapeError::TooLong)) } else { lines.swap_remove(0) };
         line.x = 0;
         let w = line.advance() as f64 * size / f64::from(face.units_per_em().max(1));
@@ -90,6 +95,21 @@ impl UnicodeLines {
     pub fn ops(&mut self, line: &LaidLine, font: &str, x: f64, y: f64, size: f64) -> Result<String, TextError> {
         let opts = PaintOptions { font, size, left: x, baseline: y, leading: size, fake_bold: false, slant: 0.0, actual_text: false };
         Ok(paint_lines(&mut self.subset, std::slice::from_ref(line), &opts)?)
+    }
+
+    /// The two-byte code of a laid-out cluster (added to the subset if new).
+    pub fn code(&mut self, cluster: &crate::shaping::Cluster) -> Result<u16, TextError> {
+        Ok(self.subset.code(cluster)?)
+    }
+
+    /// The face's units per em (laid-out positions are in these units).
+    pub fn units_per_em(&self) -> u16 {
+        self.subset.face().units_per_em()
+    }
+
+    /// `text` laid out as a paragraph `width` points wide at `size` points.
+    pub fn paragraph(&self, text: &str, size: f64, width: f64, direction: BaseDirection, align: LineAlign) -> Result<Vec<LaidLine>, TextError> {
+        Ok(layout_points(self.subset.face(), text, size, width, direction, align)?)
     }
 
     /// Write the font into `doc`; nothing is added on error.

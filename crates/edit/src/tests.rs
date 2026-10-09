@@ -1079,3 +1079,112 @@ fn arabic_headers_footers_and_watermarks_share_one_embedded_font() {
     assert!(add_watermark(&mut doc, &[0], &Watermark { text: "سلام 日本".into(), ..Watermark::default() }, true).is_err());
     assert_eq!(write_incremental(&doc, &SaveOptions::default()).unwrap(), before);
 }
+
+/// One page whose content shows `lines` (Arabic) in an embedded subset font, as PdfCraft (and
+/// Chromium, Word) write it: codes in drawing order, one ToUnicode entry per cluster.
+fn arabic_page(lines: &[&str]) -> Option<Document> {
+    use pdfcraft_fonts::embed::FontSubset;
+    use pdfcraft_fonts::layout::{BaseDirection, LineAlign};
+    use pdfcraft_fonts::paint::{PaintOptions, layout_points, paint_lines};
+    let face = pdfcraft_fonts::shaping::ShapingFace::arabic()?;
+    let mut doc = fixture();
+    let mut subset = FontSubset::new(face);
+    let mut ops = String::new();
+    for (i, l) in lines.iter().enumerate() {
+        let laid = layout_points(face, l, 14.0, 400.0, BaseDirection::Auto, LineAlign::Start).unwrap();
+        let opts = PaintOptions {
+            font: "FAr",
+            size: 14.0,
+            left: 100.0,
+            baseline: 700.0 - 30.0 * i as f64,
+            leading: 20.0,
+            fake_bold: false,
+            slant: 0.0,
+            actual_text: false,
+        };
+        ops.push_str(&paint_lines(&mut subset, &laid, &opts).unwrap());
+    }
+    let font = subset.write(&mut doc).unwrap();
+    let content = doc.add(Object::Stream(Stream::flate(Dict::new(), ops.as_bytes())));
+    let p = page_list(&doc).swap_remove(2);
+    let mut fonts = Dict::new();
+    fonts.set(b"FAr".to_vec(), Object::Ref(font));
+    let mut res = Dict::new();
+    res.set(b"Font".to_vec(), Object::Dict(fonts));
+    doc.update_dict(p.obj, |d| {
+        d.set(b"Contents".to_vec(), Object::Ref(content));
+        d.set(b"Resources".to_vec(), Object::Dict(res));
+    })
+    .unwrap();
+    Some(reopen(&doc))
+}
+
+#[test]
+fn existing_arabic_lines_read_in_logical_order_and_are_replaced_shaped() {
+    let Some(mut doc) = arabic_page(&["مرحبا بالعالم", "رقم 123 ABC"]) else {
+        eprintln!("skipping: built without the craft-fonts Arabic face (set CRAFT_FONTS_DIR)");
+        return;
+    };
+    let lines = text_lines(&doc, 2).unwrap();
+    // The first line has one reading. The second is drawn "ABC 123 مقر", which UAX #9 also
+    // draws from "رقم ABC 123" in a right-to-left paragraph (digits after Latin take its
+    // direction): the drawing can't tell which was typed, so the line says so.
+    assert_eq!(lines[0].text, "مرحبا بالعالم");
+    assert!(lines[0].rtl && lines[0].direction_certain);
+    assert!(["رقم 123 ABC", "رقم ABC 123"].contains(&lines[1].text.as_str()), "{}", lines[1].text);
+    assert!(lines[1].rtl && !lines[1].direction_certain);
+    // Either way, the line rewritten with the text it was read as is drawn as before: the edit
+    // keeps the direction it was read in.
+    let drawn = |l: &TextLine| {
+        let mut u = l.units.clone();
+        u.sort_by(|a, b| a.1.total_cmp(&b.1));
+        u.into_iter().map(|(t, _)| t).collect::<String>()
+    };
+    let before = drawn(&lines[1]);
+    assert_eq!(before, "ABC 123 مقر");
+    let mut same = doc.clone();
+    replace_line(&mut same, 2, 1, &format!("{} ", lines[1].text)).unwrap();
+    let after = text_lines(&reopen(&same), 2).unwrap();
+    assert_eq!(drawn(&after[1]).trim_start(), before);
+    let right = lines[0].rect[2];
+    // Same letters as the font already has: before, they were re-encoded one fixed form each,
+    // in typed order (disjoined and mirrored). Now they are shaped in a new embedded font.
+    let edit = replace_line(&mut doc, 2, 0, "بالعالم مرحبا").unwrap();
+    assert!(edit.substituted.as_deref().is_some_and(|f| f.contains("Arabic")), "{edit:?}");
+    let doc = reopen(&doc);
+    let lines = text_lines(&doc, 2).unwrap();
+    assert_eq!(lines[0].text, "بالعالم مرحبا");
+    assert!((lines[0].rect[2] - right).abs() < 1.0, "a right-to-left line keeps its right edge: {} vs {right}", lines[0].rect[2]);
+    assert!(streams(&doc, 2).join("\n").contains("/PCUni 14 Tf"));
+    // Latin replacement text in an Arabic line uses a standard font, as before.
+    let mut doc = doc;
+    replace_line(&mut doc, 2, 1, "Number 42").unwrap();
+    assert_eq!(text_lines(&doc, 2).unwrap()[1].text, "Number 42");
+}
+
+#[test]
+fn existing_arabic_paragraphs_are_rewritten_shaped_and_wrapped() {
+    let Some(mut doc) = arabic_page(&["هذه فقرة عربية قصيرة"]) else { return };
+    let blocks = text_blocks(&doc, 2).unwrap();
+    assert_eq!(blocks[0].text, "هذه فقرة عربية قصيرة");
+    let long = "هذه فقرة عربية أطول بكثير من السابقة ويجب أن تلتف على عدة أسطر داخل عرض الفقرة نفسه";
+    rewrite_block(&mut doc, 2, 0, Some(long), &BlockStyle { width: Some(200.0), ..BlockStyle::default() }).unwrap();
+    let doc = reopen(&doc);
+    let lines = text_lines(&doc, 2).unwrap();
+    assert!(lines.len() >= 3, "{lines:?}");
+    let joined: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(joined.join(" "), long, "the lines read back in order");
+    assert!(lines.iter().all(|l| l.rtl));
+}
+
+#[test]
+fn arabic_edits_that_cannot_be_shown_change_nothing() {
+    let Some(mut doc) = arabic_page(&["مرحبا بالعالم"]) else { return };
+    let before = write_incremental(&doc, &SaveOptions::default()).unwrap();
+    for text in ["مرحبا 日本", "שלום עולם"] {
+        assert!(replace_line(&mut doc, 2, 0, text).is_err(), "{text}");
+        assert!(rewrite_block(&mut doc, 2, 0, Some(text), &BlockStyle::default()).is_err(), "{text}");
+        assert_eq!(write_incremental(&doc, &SaveOptions::default()).unwrap(), before, "{text}: the document is unchanged");
+    }
+    assert_eq!(text_lines(&doc, 2).unwrap()[0].text, "مرحبا بالعالم");
+}

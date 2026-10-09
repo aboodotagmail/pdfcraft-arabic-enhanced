@@ -16,7 +16,8 @@
 - **Arabic text in PDFs** (in progress): joining forms, lam-alef ligatures and diacritics (tashkeel) shaped with
   the font's own OpenType tables; right-to-left and mixed-direction lines laid out with the Unicode
   bidirectional algorithm; embedded as a TrueType subset (Type0/CIDFontType2) with a ToUnicode map
-  and ActualText, so copy, search and selection give back the text as typed.
+  (ActualText optional), so copy, search and selection give back the text as typed; existing
+  Arabic lines are read per UAX #9 and can be edited without breaking their letters.
 - **Windows x64 MSI** built by GitHub Actions (`.github/workflows/windows-x64.yml`), installed,
   launched and uninstalled on every build.
 - Arabic font: [Noto Sans Arabic](https://github.com/notofonts/arabic) (SIL OFL 1.1) from the

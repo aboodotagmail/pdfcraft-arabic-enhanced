@@ -429,7 +429,7 @@ pub fn add_page_font(doc: &mut Document, page: usize, name: &str, font: pdfcraft
 }
 
 /// Run an edit all or nothing: on error the document is exactly as it was.
-fn atomic<T>(doc: &mut Document, f: impl FnOnce(&mut Document) -> Result<T, EditError>) -> Result<T, EditError> {
+pub(crate) fn atomic<T>(doc: &mut Document, f: impl FnOnce(&mut Document) -> Result<T, EditError>) -> Result<T, EditError> {
     let before = doc.clone();
     let result = f(doc);
     if result.is_err() {
