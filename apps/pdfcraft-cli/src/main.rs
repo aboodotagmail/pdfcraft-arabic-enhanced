@@ -4,6 +4,7 @@
 //! pdfcraft-cli info   <file.pdf> [--password PW]            document summary as JSON
 //! pdfcraft-cli render <file.pdf> --page N [--dpi 96] --out x.png   (.png, .jpg, .tif or .pam)
 //! pdfcraft-cli text   <file.pdf> [--page N]                  extracted text (pages separated by form feeds)
+//! pdfcraft-cli text-audit <file.pdf> [--password PW]        how the text decodes, per page and font: counts only, no text
 //! pdfcraft-cli edit   <in.pdf> --out out.pdf [--rotate 1,3:90] [--delete 2,4] [--move 5:1]
 //!                       [--insert-blank 1] [--title T] [--author A] [--full]
 //! pdfcraft-cli combine <a.pdf> <b.pdf> … --out combined.pdf
@@ -50,6 +51,7 @@ fn main() -> ExitCode {
             Some("info") => info(&args[1..]),
             Some("render") => render(&args[1..]),
             Some("text") => text(&args[1..]),
+            Some("text-audit") => text_audit(&args[1..]),
             Some("edit") => edit(&args[1..]),
             Some("combine") => combine(&args[1..]),
             Some("extract") => extract(&args[1..]),
@@ -62,7 +64,7 @@ fn main() -> ExitCode {
             #[cfg(feature = "mcp")]
             Some("mcp") => mcp(&args[1..]),
             Some("--version") => version(),
-            _ => Err("usage: pdfcraft-cli <info|render|text|edit|combine|extract|split|check|tools|run|mcp|ui> …  (see source header for options)\nhelp and feedback: https://discord.gg/artcraft"
+            _ => Err("usage: pdfcraft-cli <info|render|text|text-audit|edit|combine|extract|split|check|tools|run|mcp|ui> …  (see source header for options)\nhelp and feedback: https://github.com/aboodotagmail/pdfcraft-arabic-enhanced/issues"
                 .into()),
         };
     match result {
@@ -301,6 +303,40 @@ fn edit(args: &[String]) -> Result<(), CliError> {
     }
     let bytes = if full { session.save_full_bytes(id) } else { session.save_bytes(id) }.map_err(|e| e.to_string())?;
     std::fs::write(out, bytes.as_slice()).map_err(|e| format!("{out}: {e}").into())
+}
+
+/// `text-audit FILE [--password PW]`: how each page's text decodes for export, as JSON: codes
+/// shown and left without a Unicode meaning, per font, and counts of each kind of character
+/// (Arabic letters, presentation forms, private-use, U+FFFD...). It prints no text, so the
+/// result of a confidential document can be shared.
+fn text_audit(args: &[String]) -> Result<(), CliError> {
+    use pdfcraft_engine::Session;
+    let path = *positional(args).first().ok_or("text-audit: missing file")?;
+    let password = flag(args, "--password");
+    let mut session = Session::new();
+    let id = session.open(path, Some(path.to_string()), read(path)?, password).map_err(|e| format!("text-audit: {e}"))?;
+    let doc = session.get(id).ok_or("text-audit: the document did not open")?;
+    let pages: Vec<serde_json::Value> = doc
+        .text_audit()
+        .into_iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let c = &a.chars;
+            serde_json::json!({
+                "page": i + 1,
+                "codes": a.codes,
+                "unmapped_codes": a.unmapped,
+                "chars": {
+                    "arabic_letters": c.arabic_letters, "hebrew_letters": c.hebrew_letters, "latin_letters": c.latin_letters,
+                    "digits": c.digits, "marks": c.marks, "presentation_forms": c.presentation_forms,
+                    "private_use": c.private_use, "replacement": c.replacement, "controls": c.controls, "other": c.other,
+                },
+                "fonts": a.fonts.iter().map(|f| serde_json::json!({ "base_font": f.base_font, "codes": f.codes, "unmapped_codes": f.unmapped })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let out = serde_json::to_string_pretty(&serde_json::json!({ "pages": pages })).map_err(|e| e.to_string())?;
+    writeln!(std::io::stdout().lock(), "{out}").map_err(CliError::Stdout)
 }
 
 fn file_stem(path: &str) -> String {

@@ -12,6 +12,7 @@ workspace = true
 pdfcraft-cos = { workspace = true }
 pdfcraft-content = { workspace = true }
 pdfcraft-fonts = { workspace = true }
+unicode-bidi = "0.3"
 pdfcraft-model = { workspace = true }
 thiserror = { workspace = true }
 

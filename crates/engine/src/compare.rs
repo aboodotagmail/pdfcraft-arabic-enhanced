@@ -150,6 +150,13 @@ impl OfficeFormat {
 }
 
 impl crate::Document {
+    /// How each page's text decodes for export (counts and font names only; see
+    /// `pdfcraft_edit::audit_page`). A page that can't be read gives an empty audit.
+    pub fn text_audit(&self) -> Vec<pdfcraft_edit::PageAudit> {
+        let Some(cos) = self.editor.as_ref().map(|e| &e.cos) else { return Vec::new() };
+        (0..self.info.pages.len()).map(|i| pdfcraft_edit::audit_page(cos, i).unwrap_or_default()).collect()
+    }
+
     /// The pages as paragraphs and images (for Word, HTML and RTF export), including what
     /// form XObjects draw.
     pub fn export_pages(&self) -> Vec<pdfcraft_export::Page> {

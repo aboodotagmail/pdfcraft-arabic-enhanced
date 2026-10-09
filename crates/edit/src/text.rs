@@ -47,6 +47,9 @@ pub struct TextLine {
     pub direction_certain: bool,
     /// Each code's text and where it starts (user space), in content order.
     pub(crate) units: Vec<(String, f64)>,
+    /// Codes the line shows, and how many have no Unicode meaning (dropped from `text`).
+    pub(crate) codes: usize,
+    pub(crate) unmapped: usize,
     stream: usize,
     ops: Vec<usize>,
     /// Where the line starts: text matrix (text space), the state there, and its `BT`.
@@ -258,6 +261,9 @@ struct Shown {
     bold: bool,
     italic: bool,
     decodable: bool,
+    /// Codes shown, and how many of them have no Unicode meaning in the font.
+    codes: usize,
+    unmapped: usize,
 }
 
 /// The graphics state carried from one of a page's content streams to the next: the streams
@@ -390,17 +396,22 @@ fn interpret(
                 let mut text = String::new();
                 let mut units: Vec<(String, f64)> = Vec::new();
                 let mut decodable = true;
+                let (mut n_codes, mut n_unmapped) = (0usize, 0usize);
                 let mut x_text = 0.0;
                 for p in &pieces {
                     match p {
                         Object::String(s) => {
                             for (code, len) in m.codes(&s.bytes) {
+                                n_codes = n_codes.saturating_add(1);
                                 match m.text_of(code) {
                                     Some(t) => {
                                         text.push_str(t);
                                         units.push((t.to_string(), trm0.apply(x_text, ts.rise).0));
                                     }
-                                    None => decodable = false,
+                                    None => {
+                                        decodable = false;
+                                        n_unmapped = n_unmapped.saturating_add(1);
+                                    }
                                 }
                                 let w = m.width(code) * ts.size + ts.char_spacing + if m.is_space(code, len) { ts.word_spacing } else { 0.0 };
                                 x_text += w * ts.scale;
@@ -452,6 +463,8 @@ fn interpret(
                     bold: m.bold,
                     italic: m.italic,
                     decodable,
+                    codes: n_codes,
+                    unmapped: n_unmapped,
                 });
             }
             _ => {}
@@ -600,6 +613,8 @@ fn add_shown(lines: &mut Vec<TextLine>, last: &mut Option<(usize, f64, f64, f64)
         l.rect = [l.rect[0].min(s.rect[0]), l.rect[1].min(s.rect[1]), l.rect[2].max(s.rect[2]), l.rect[3].max(s.rect[3])];
         l.ops.push(s.op);
         l.decodable &= s.decodable;
+        l.codes = l.codes.saturating_add(s.codes);
+        l.unmapped = l.unmapped.saturating_add(s.unmapped);
         l.color = fill_color(&s.state.fill);
     } else {
         lines.push(TextLine {
@@ -615,6 +630,8 @@ fn add_shown(lines: &mut Vec<TextLine>, last: &mut Option<(usize, f64, f64, f64)
             rtl: false,
             direction_certain: true,
             units: s.units.clone(),
+            codes: s.codes,
+            unmapped: s.unmapped,
             stream,
             ops: vec![s.op],
             origin: Origin {
@@ -684,6 +701,12 @@ pub(crate) fn form_call(doc: &Document, resources: &Dict, name: &[u8], ctm: Matr
 /// [`text_lines`] leaves out because it can only rewrite the page's own streams). Lines from a
 /// form carry a stream number past the page's streams, one per form drawn.
 fn reading_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditError> {
+    reading_lines_with(doc, page, false)
+}
+
+/// [`reading_lines`]; `keep_empty` also keeps lines with no decoded text (every code unmapped),
+/// unordered, for [`audit_page`].
+fn reading_lines_with(doc: &Document, page: usize, keep_empty: bool) -> Result<Vec<TextLine>, EditError> {
     struct Walk<'a> {
         doc: &'a Document,
         lines: Vec<TextLine>,
@@ -738,6 +761,9 @@ fn reading_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditError
         walk(&mut w, &parse(&data).ops, &res, &mut carry, si);
     }
     let mut lines = w.lines;
+    if keep_empty {
+        return Ok(lines);
+    }
     lines.retain(|l| !l.text.trim().is_empty());
     let crop = p.crop(doc);
     for l in &mut lines {
@@ -1033,6 +1059,86 @@ fn coincident_ops(lines: &[TextLine], rects: &[[f64; 4]]) -> std::collections::H
 pub fn text_blocks(doc: &Document, page: usize) -> Result<Vec<TextBlock>, EditError> {
     let lines = text_lines(doc, page)?;
     Ok(group_blocks(&lines))
+}
+
+/// How the text of one font on a page decodes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FontAudit {
+    /// `/BaseFont`, as the file names it.
+    pub base_font: String,
+    pub codes: usize,
+    /// Codes with no Unicode meaning (no ToUnicode entry and no encoding): dropped from text.
+    pub unmapped: usize,
+}
+
+/// The kinds of characters a page's text decodes to. Counts only: no text.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CharCounts {
+    pub arabic_letters: usize,
+    pub hebrew_letters: usize,
+    pub latin_letters: usize,
+    pub digits: usize,
+    /// Combining marks (Arabic harakat and the like).
+    pub marks: usize,
+    /// Arabic presentation forms (U+FB50–FDFF, U+FE70–FEFF): contextual glyph codes, not letters.
+    pub presentation_forms: usize,
+    /// Private-use code points (U+E000–F8FF and the supplementary planes 15–16).
+    pub private_use: usize,
+    /// U+FFFD replacement characters.
+    pub replacement: usize,
+    /// Control characters other than tab and newline.
+    pub controls: usize,
+    pub other: usize,
+}
+
+impl CharCounts {
+    pub fn add(&mut self, text: &str) {
+        for c in text.chars() {
+            let n = u32::from(c);
+            let slot = match n {
+                0xFFFD => &mut self.replacement,
+                0xE000..=0xF8FF | 0xF_0000..=0x10_FFFF => &mut self.private_use,
+                0xFB50..=0xFDFF | 0xFE70..=0xFEFF => &mut self.presentation_forms,
+                _ if unicode_bidi::bidi_class(c) == unicode_bidi::BidiClass::NSM => &mut self.marks,
+                0x0600..=0x06FF | 0x0750..=0x077F | 0x08A0..=0x08FF if c.is_alphabetic() => &mut self.arabic_letters,
+                0x0590..=0x05FF if c.is_alphabetic() => &mut self.hebrew_letters,
+                _ if c.is_numeric() => &mut self.digits,
+                _ if c.is_alphabetic() && n < 0x0250 => &mut self.latin_letters,
+                _ if c.is_control() && c != '\t' && c != '\n' => &mut self.controls,
+                _ => &mut self.other,
+            };
+            *slot = slot.saturating_add(1);
+        }
+    }
+}
+
+/// What a page's text decodes to, by font and by kind of character, as export reads it
+/// (`reading_blocks`). It holds counts and font names, never the text itself, so it can be
+/// shared to diagnose a confidential document.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PageAudit {
+    pub codes: usize,
+    pub unmapped: usize,
+    pub chars: CharCounts,
+    pub fonts: Vec<FontAudit>,
+}
+
+/// [`PageAudit`] for page `page` (0-based).
+pub fn audit_page(doc: &Document, page: usize) -> Result<PageAudit, EditError> {
+    let mut out = PageAudit::default();
+    for l in reading_lines_with(doc, page, true)? {
+        out.codes = out.codes.saturating_add(l.codes);
+        out.unmapped = out.unmapped.saturating_add(l.unmapped);
+        out.chars.add(&l.text);
+        match out.fonts.iter_mut().find(|f| f.base_font == l.base_font) {
+            Some(f) => {
+                f.codes = f.codes.saturating_add(l.codes);
+                f.unmapped = f.unmapped.saturating_add(l.unmapped);
+            }
+            None => out.fonts.push(FontAudit { base_font: l.base_font.clone(), codes: l.codes, unmapped: l.unmapped }),
+        }
+    }
+    Ok(out)
 }
 
 /// The paragraphs on a page as a reader sees them, including text drawn by form XObjects

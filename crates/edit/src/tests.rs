@@ -1360,3 +1360,35 @@ fn arabic_paragraph_widened_from_its_left_edge_keeps_its_right_edge() {
     assert!(after.rtl);
     assert!((after.rect[2] - before.rect[2]).abs() < 1.0, "right edge {} -> {}", before.rect[2], after.rect[2]);
 }
+
+/// A one-page document whose font F1 is a composite (Identity-H) font with a ToUnicode map
+/// `tounicode` (bfchar body), drawing `content` (all synthetic).
+fn composite_font_page(tounicode: &str, content: &str) -> Document {
+    let cmap = format!(
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /T def 1 begincodespacerange <0000> <FFFF> endcodespacerange {tounicode} endcmap CMapName currentdict /CMap defineresource pop end end"
+    );
+    build(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        &stream("", content),
+        "<< /Type /Font /Subtype /Type0 /BaseFont /ABCDEF+SakkalMajalla /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 7 0 R >>",
+        "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /ABCDEF+SakkalMajalla /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 500 >>",
+        &stream("", &cmap),
+    ])
+}
+
+/// The audit counts what export would read, never the text: a code mapped to a letter, one
+/// mapped to a private-use code point, and one with no mapping at all (dropped from the text).
+#[test]
+fn text_audit_counts_unmapped_and_private_use_codes() {
+    let doc = composite_font_page(
+        "2 beginbfchar <0001> <0627> <0002> <E000> endbfchar",
+        "BT /F1 12 Tf 100 700 Td <000100020003> Tj ET BT /F1 12 Tf 100 600 Td <0003> Tj ET",
+    );
+    let a = audit_page(&doc, 0).unwrap();
+    assert_eq!((a.codes, a.unmapped), (4, 2), "{a:?}");
+    assert_eq!(a.chars.arabic_letters, 1);
+    assert_eq!(a.chars.private_use, 1);
+    assert_eq!(a.fonts, [FontAudit { base_font: "ABCDEF+SakkalMajalla".into(), codes: 4, unmapped: 2 }]);
+}
