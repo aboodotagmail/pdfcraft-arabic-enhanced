@@ -1345,3 +1345,18 @@ fn reading_blocks_give_arabic_in_logical_order() {
     let all = reading.join("\n");
     assert!(all.contains("مرحبا بالعالم") && all.contains("The word سلام means peace."), "{all}");
 }
+
+/// A paragraph's left edge dragged outwards (Edit text, #436) sends a wider width and the same
+/// shift left: a right-to-left paragraph keeps its right edge, where its lines start, and its text.
+#[test]
+fn arabic_paragraph_widened_from_its_left_edge_keeps_its_right_edge() {
+    let Some(mut doc) = arabic_page(&["هذه فقرة عربية قصيرة"]) else { return };
+    let before = text_blocks(&doc, 2).unwrap()[0].clone();
+    let width = before.rect[2] - before.rect[0];
+    let style = BlockStyle { width: Some(width + 60.0), offset: Some([-60.0, 0.0]), ..BlockStyle::default() };
+    rewrite_block(&mut doc, 2, 0, None, &style).unwrap();
+    let after = text_blocks(&reopen(&doc), 2).unwrap()[0].clone();
+    assert_eq!(after.text, before.text);
+    assert!(after.rtl);
+    assert!((after.rect[2] - before.rect[2]).abs() < 1.0, "right edge {} -> {}", before.rect[2], after.rect[2]);
+}
