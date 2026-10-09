@@ -149,6 +149,25 @@ impl OfficeFormat {
     }
 }
 
+/// A paragraph (or fragment) as export writes it: presentation-form code points (contextual
+/// glyph codes some files map to) become the letters they show, as search and copy read them;
+/// bold and italic come from the font's name. `None` for blank text.
+fn export_block(b: pdfcraft_edit::TextBlock) -> Option<pdfcraft_export::Block> {
+    if b.text.trim().is_empty() {
+        return None;
+    }
+    let f = b.base_font.to_ascii_lowercase();
+    Some(pdfcraft_export::Block {
+        text: pdfcraft_fonts::glyph_text::normalize_presentation_forms(&b.text).into_owned(),
+        rect: b.rect,
+        size: b.size,
+        bold: f.contains("bold") || f.contains("black") || f.contains("heavy"),
+        italic: f.contains("italic") || f.contains("oblique"),
+        rtl: b.rtl,
+        font: None,
+    })
+}
+
 /// An exported Word, HTML or RTF file.
 pub struct OfficeExport {
     pub bytes: Vec<u8>,
@@ -175,24 +194,11 @@ impl crate::Document {
             .iter()
             .enumerate()
             .map(|(i, info)| {
-                let blocks = pdfcraft_edit::reading_blocks(cos, i)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|b| !b.text.trim().is_empty())
-                    .map(|b| {
-                        let f = b.base_font.to_ascii_lowercase();
-                        pdfcraft_export::Block {
-                            // Presentation-form code points (contextual glyph codes some files map
-                            // to) become the letters they show, as search and copy read them.
-                            text: pdfcraft_fonts::glyph_text::normalize_presentation_forms(&b.text).into_owned(),
-                            rect: b.rect,
-                            size: b.size,
-                            bold: f.contains("bold") || f.contains("black") || f.contains("heavy"),
-                            italic: f.contains("italic") || f.contains("oblique"),
-                            rtl: b.rtl,
-                        }
-                    })
-                    .collect();
+                let blocks = pdfcraft_edit::reading_blocks(cos, i).unwrap_or_default().into_iter().filter_map(export_block).collect();
+                // Pieces of lines that never span two table cells, and the rules the page draws:
+                // what tables drawn with borders are found from.
+                let fragments = pdfcraft_edit::reading_fragments(cos, i).unwrap_or_default().into_iter().filter_map(export_block).collect();
+                let rules = pdfcraft_edit::page_rules(cos, i).unwrap_or_default();
                 let images = pdfcraft_edit::reading_images(cos, i)
                     .unwrap_or_default()
                     .iter()
@@ -201,7 +207,7 @@ impl crate::Document {
                         Some(pdfcraft_export::Image { ext: if ext == "jpg" { "jpg" } else { "png" }, bytes, rect: im.rect })
                     })
                     .collect();
-                pdfcraft_export::Page { width: info.width as f64, height: info.height as f64, blocks, images }
+                pdfcraft_export::Page { width: info.width as f64, height: info.height as f64, blocks, images, fragments, rules }
             })
             .collect()
     }

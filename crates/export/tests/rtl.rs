@@ -7,7 +7,7 @@ use std::io::Read;
 use pdfcraft_export::{Block, Page, docx, html, rtf};
 
 fn block(text: &str, x: f64, y: f64, w: f64, size: f64, rtl: bool) -> Block {
-    Block { text: text.into(), rect: [x, y, x + w, y + size], size, bold: false, italic: false, rtl }
+    Block { text: text.into(), rect: [x, y, x + w, y + size], size, bold: false, italic: false, rtl, font: None }
 }
 
 /// A page: an Arabic heading and paragraph, a mixed line, an English paragraph, and a
@@ -25,7 +25,7 @@ fn page() -> Page {
             blocks.push(block(text, x, y, 60.0, 11.0, true));
         }
     }
-    Page { width: 612.0, height: 792.0, blocks, images: Vec::new() }
+    Page { width: 612.0, height: 792.0, blocks, images: Vec::new(), ..Default::default() }
 }
 
 fn unzip(bytes: &[u8], name: &str) -> String {
@@ -101,6 +101,7 @@ fn latin_exports_are_unchanged() {
         height: 792.0,
         blocks: vec![block("Hello world, this is body text.", 72.0, 700.0, 400.0, 11.0, false)],
         images: Vec::new(),
+        ..Default::default()
     };
     let h = html(std::slice::from_ref(&p), "t");
     assert!(h.contains("<p>Hello world, this is body text.</p>") && !h.contains("dir="));

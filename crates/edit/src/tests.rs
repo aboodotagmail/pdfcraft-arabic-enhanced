@@ -1489,3 +1489,40 @@ fn arabic_glyphs_without_usable_tounicode_read_from_the_font_program() {
     assert_eq!(audit_page(&none, 2).unwrap().unmapped, 0);
     assert_eq!(audit_page(&right, 2).unwrap().unmapped, 1);
 }
+
+/// Table borders for export: stroked rectangles and lines, thin filled boxes and a form's rules
+/// (through its matrix) are rules; a diagonal, a curve and a shaded cell are not.
+#[test]
+fn page_rules_reads_borders_from_strokes_fills_and_forms() {
+    let page = stream(
+        "",
+        "q 2 0 0 2 0 0 cm 10 10 50 20 re S Q \
+         100 500 m 300 500 l S \
+         100 400 200 0.5 re f \
+         100 300 200 80 re f \
+         0 0 m 50 50 l S \
+         0 0 m 10 40 40 40 50 0 c S \
+         /Fm1 Do",
+    );
+    let fm1 = stream("/Type /XObject /Subtype /Form /BBox [0 0 600 800] /Matrix [1 0 0 1 0 100]", "400 100 m 400 200 l S");
+    let doc = build(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Resources << /XObject << /Fm1 5 0 R >> >> /Contents 4 0 R >>",
+        &page,
+        &fm1,
+    ]);
+    let mut rules = page_rules(&doc, 0).unwrap();
+    rules.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let want = [
+        [20.0, 20.0, 20.0, 60.0],
+        [20.0, 20.0, 120.0, 20.0],
+        [20.0, 60.0, 120.0, 60.0],
+        [100.0, 400.25, 300.0, 400.25],
+        [100.0, 500.0, 300.0, 500.0],
+        [120.0, 20.0, 120.0, 60.0],
+        [400.0, 200.0, 400.0, 300.0],
+    ];
+    assert_eq!(rules, want);
+    assert!(page_rules(&doc, 5).is_err());
+}

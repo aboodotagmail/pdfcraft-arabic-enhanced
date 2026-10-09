@@ -7,12 +7,13 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod grid;
 mod zip;
 
 pub use zip::Zip;
 
-/// A paragraph of a page.
-#[derive(Clone, Debug, PartialEq)]
+/// A paragraph of a page (or, in [`Page::fragments`], one piece of a line).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Block {
     pub text: String,
     /// [x0, y0, x1, y1] in user space (y up).
@@ -23,6 +24,8 @@ pub struct Block {
     pub italic: bool,
     /// The paragraph reads right to left (Arabic, Hebrew); `text` is in logical order.
     pub rtl: bool,
+    /// The font family the PDF names for the text ("Sakkal Majalla"), when it can be told.
+    pub font: Option<String>,
 }
 
 /// An image of a page.
@@ -40,10 +43,28 @@ pub struct Page {
     pub height: f64,
     pub blocks: Vec<Block>,
     pub images: Vec<Image>,
+    /// The page's text in pieces that never span two table cells (one line each), for finding
+    /// tables. Empty: tables are looked for among `blocks`.
+    pub fragments: Vec<Block>,
+    /// The horizontal and vertical rules the page draws ([x0, y0, x1, y1], user space): table
+    /// borders. A grid of them is a table whatever its text.
+    pub rules: Vec<[f64; 4]>,
+}
+
+/// How a cell takes part in a cell merged down several rows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VMerge {
+    #[default]
+    None,
+    /// The first row of a merged cell: it holds the text.
+    Restart,
+    /// A later row of the merged cell above (no text of its own).
+    Continue,
 }
 
 /// One cell of a detected table. `span` is how many grid columns the cell covers (a header
-/// row that stretches over sub-columns).
+/// row that stretches over sub-columns); `vmerge` joins it to the cells below. Lines of text are
+/// separated by `\n`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Cell {
     pub text: String,
@@ -53,6 +74,14 @@ pub struct Cell {
     pub span: usize,
     /// The cell's text reads right to left.
     pub rtl: bool,
+    pub vmerge: VMerge,
+    pub font: Option<String>,
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Cell { text: String::new(), size: 11.0, bold: false, italic: false, span: 1, rtl: false, vmerge: VMerge::None, font: None }
+    }
 }
 
 /// A table detected from the page's text layout: rows of cells, and the left edge of each
@@ -65,12 +94,20 @@ pub struct Table {
 }
 
 impl Table {
-    /// A right-to-left table: most of its non-empty cells read right to left. Its first logical
+    /// A right-to-left table: more of its cells with letters read right to left than left to
+    /// right (numbers have no direction). Its first logical
     /// column is then the rightmost one.
     pub fn rtl(&self) -> bool {
-        let cells = self.rows.iter().flatten().filter(|c| !c.text.is_empty());
-        let (rtl, all) = cells.fold((0usize, 0usize), |(r, a), c| (r + usize::from(c.rtl), a + 1));
-        all > 0 && rtl * 2 > all
+        // Only cells with letters have a direction: numbers and symbols read the same either way.
+        let (mut rtl, mut ltr) = (0usize, 0usize);
+        for c in self.rows.iter().flatten() {
+            if has_rtl(&c.text) {
+                rtl += 1;
+            } else if c.text.chars().any(|ch| ch.is_alphabetic()) {
+                ltr += 1;
+            }
+        }
+        rtl > ltr
     }
 
     /// A row's cells in the table's logical order: left to right for a left-to-right table;
@@ -83,7 +120,7 @@ impl Table {
         let mut cells = row.to_vec();
         let used: usize = row.iter().map(|c| c.span.max(1)).sum();
         for _ in used..self.cols.len() {
-            cells.push(Cell { text: String::new(), size: 11.0, bold: false, italic: false, span: 1, rtl: true });
+            cells.push(Cell { rtl: true, ..Cell::default() });
         }
         cells.reverse();
         std::borrow::Cow::Owned(cells)
@@ -274,7 +311,16 @@ fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
                 let b = &blocks[bi];
                 let Some(slot) = edges.iter().position(|e| (*e - b.rect[0]).abs() <= COL_TOL) else { continue };
                 let span = edges[slot + 1..].iter().filter(|e| **e > b.rect[0] + COL_TOL && **e < b.rect[2] - COL_TOL).count() + 1;
-                let cell = Cell { text: b.text.trim().to_string(), size: b.size, bold: b.bold, italic: b.italic, span, rtl: b.rtl };
+                let cell = Cell {
+                    text: b.text.trim().to_string(),
+                    size: b.size,
+                    bold: b.bold,
+                    italic: b.italic,
+                    span,
+                    rtl: b.rtl,
+                    font: b.font.clone(),
+                    ..Cell::default()
+                };
                 match &mut slots[slot] {
                     Some(c) => {
                         c.text.push(' ');
@@ -295,7 +341,7 @@ fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
                     }
                     None => {
                         column += 1;
-                        materialized.push(Cell { text: String::new(), size: 11.0, bold: false, italic: false, span: 1, rtl: false });
+                        materialized.push(Cell::default());
                     }
                 }
             }
@@ -359,6 +405,79 @@ fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
     (out, consumed)
 }
 
+/// The tables on a page and, per block, whether a table holds its text: tables drawn with rules
+/// (from the page's fragments, see `grid`), then tables laid out in columns without rules (from
+/// the blocks, by their start edges).
+fn page_tables(p: &Page) -> (Vec<Table>, Vec<bool>) {
+    let ruled: Vec<Table> =
+        if p.fragments.is_empty() { Vec::new() } else { grid::ruled_tables(&p.rules, &p.fragments).into_iter().map(|(t, _)| t).collect() };
+    let inside: Vec<bool> = p.blocks.iter().map(|b| ruled.iter().any(|t| mostly_inside(b.rect, t.rect))).collect();
+    let rest: Vec<(usize, &Block)> = p.blocks.iter().enumerate().filter(|(i, _)| !inside.get(*i).copied().unwrap_or(false)).collect();
+    let rest_blocks: Vec<Block> = rest.iter().map(|(_, b)| (*b).clone()).collect();
+    let (unruled, consumed_rest) = tables_by_direction(&rest_blocks);
+    let mut consumed = inside;
+    for ((i, _), c) in rest.iter().zip(consumed_rest) {
+        if c && let Some(slot) = consumed.get_mut(*i) {
+            *slot = true;
+        }
+    }
+    let mut all = ruled;
+    all.extend(unruled);
+    (all, consumed)
+}
+
+/// Whether most of `r` lies inside `table` (a paragraph that is a table's text).
+fn mostly_inside(r: [f64; 4], table: [f64; 4]) -> bool {
+    let w = (r[2].min(table[2] + 1.0) - r[0].max(table[0] - 1.0)).max(0.0);
+    let h = (r[3].min(table[3] + 1.0) - r[1].max(table[1] - 1.0)).max(0.0);
+    let area = (r[2] - r[0]).max(0.0) * (r[3] - r[1]).max(0.0);
+    if area <= f64::EPSILON {
+        let (cx, cy) = ((r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0);
+        return cx >= table[0] && cx <= table[2] && cy >= table[1] && cy <= table[3];
+    }
+    w * h > 0.5 * area
+}
+
+/// [`tables`], with columns found by their start edge: on a page of mostly right-to-left text,
+/// cells line up on the right (their left edges are ragged), so the page is mirrored, its
+/// tables found, and the tables mirrored back.
+fn tables_by_direction(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
+    let rtl: usize = blocks.iter().filter(|b| b.rtl).map(|b| b.text.chars().count()).sum();
+    let all: usize = blocks.iter().map(|b| b.text.chars().count()).sum();
+    if rtl * 2 <= all {
+        return tables(blocks);
+    }
+    let mirror = |r: [f64; 4]| [-r[2], r[1], -r[0], r[3]];
+    let mirrored: Vec<Block> = blocks.iter().map(|b| Block { rect: mirror(b.rect), ..b.clone() }).collect();
+    let (found, consumed) = tables(&mirrored);
+    let back = found
+        .into_iter()
+        .map(|t| {
+            // Column j spans [cols[j], cols[j+1] or the right edge] mirrored; back on the page
+            // the columns run the other way.
+            let n = t.cols.len();
+            let ends: Vec<f64> = (0..n).map(|j| t.cols.get(j + 1).copied().unwrap_or(t.rect[2])).collect();
+            let mut cols: Vec<f64> = ends.iter().map(|e| -e).collect();
+            cols.sort_by(f64::total_cmp);
+            let rows = t
+                .rows
+                .into_iter()
+                .map(|mut row| {
+                    // Pad to the full grid, then read it the other way (left to right on the page).
+                    let used: usize = row.iter().map(|c| c.span.max(1)).sum();
+                    for _ in used..n {
+                        row.push(Cell::default());
+                    }
+                    row.reverse();
+                    row
+                })
+                .collect();
+            Table { rect: mirror(t.rect), cols, rows }
+        })
+        .collect();
+    (back, consumed)
+}
+
 fn items(pages: &[Page]) -> Vec<Item<'_>> {
     let body = body_size(pages);
     let mut out = Vec::new();
@@ -366,7 +485,7 @@ fn items(pages: &[Page]) -> Vec<Item<'_>> {
         if i > 0 {
             out.push(Item::PageBreak);
         }
-        let (tables, consumed) = tables(&p.blocks);
+        let (tables, consumed) = page_tables(p);
         // Blocks and images by their top edge, top to bottom.
         let mut parts: Vec<(f64, f64, Item)> = p
             .blocks
@@ -445,10 +564,38 @@ table{{border-collapse:collapse;margin:1em 0}}td,th{{border:1px solid #999;paddi
             Item::Table(t) => {
                 let rtl = t.rtl();
                 s.push_str(if rtl { "<table dir=\"rtl\" style=\"margin-left:auto\">\n" } else { "<table>\n" });
-                for row in &t.rows {
+                let rows: Vec<Vec<Cell>> = t.rows.iter().map(|r| t.logical_row(r).into_owned()).collect();
+                // The grid column each cell starts at, per row (for rows spanned from above).
+                let starts: Vec<Vec<usize>> = rows
+                    .iter()
+                    .map(|r| {
+                        let mut at = 0usize;
+                        r.iter()
+                            .map(|c| {
+                                let here = at;
+                                at = at.saturating_add(c.span.max(1));
+                                here
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let continues = |ri: usize, col: usize| -> bool {
+                    rows.get(ri).zip(starts.get(ri)).is_some_and(|(r, st)| r.iter().zip(st).any(|(c, s)| *s == col && c.vmerge == VMerge::Continue))
+                };
+                for (ri, row) in rows.iter().enumerate() {
                     s.push_str("<tr>");
-                    for c in t.logical_row(row).iter() {
-                        let mut body = esc(&c.text);
+                    for (c, col) in row.iter().zip(starts.get(ri).map(Vec::as_slice).unwrap_or_default()) {
+                        if c.vmerge == VMerge::Continue {
+                            continue; // covered by the rowspan of the cell above
+                        }
+                        let mut down = 1usize;
+                        if c.vmerge == VMerge::Restart {
+                            while continues(ri + down, *col) {
+                                down += 1;
+                            }
+                        }
+                        let rowspan = if down > 1 { format!(" rowspan=\"{down}\"") } else { String::new() };
+                        let mut body = esc(&c.text).replace('\n', "<br>");
                         if c.italic {
                             body = format!("<em>{body}</em>");
                         }
@@ -462,7 +609,7 @@ table{{border-collapse:collapse;margin:1em 0}}td,th{{border:1px solid #999;paddi
                             (false, true) => " dir=\"ltr\"",
                             _ => "",
                         };
-                        s.push_str(&format!("<td{span}{dir}>{body}</td>"));
+                        s.push_str(&format!("<td{span}{rowspan}{dir}>{body}</td>"));
                     }
                     s.push_str("</tr>\n");
                 }
@@ -506,21 +653,27 @@ fn run_xml(text: &str, size: f64, bold: bool, italic: bool) -> String {
 
 /// One Word table: explicit single borders (so it renders without a table style), a grid sized
 /// from the detected column edges, `gridSpan` for spanning cells, empty cells for holes.
-fn docx_table(t: &Table) -> String {
+fn docx_table(t: &Table, max_width: i64) -> String {
     let mut edges = t.cols.clone();
     edges.push(t.rect[2]);
     let rtl = t.rtl();
     let mut widths: Vec<i64> = edges.windows(2).map(|w| ((w[1] - w[0]).max(20.0) * 20.0).round().clamp(60.0, 31680.0) as i64).collect();
+    // Columns keep their widths from the page (a fixed layout: Word's autofit squeezes columns
+    // to their text), scaled down together if the table is wider than the text area.
+    let total: i64 = widths.iter().sum();
+    if max_width > 0 && total > max_width {
+        let k = max_width as f64 / total as f64;
+        for w in &mut widths {
+            *w = ((*w as f64 * k).round() as i64).max(60);
+        }
+    }
+    let total: i64 = widths.iter().sum();
     if rtl {
         // A `bidiVisual` table lists its grid from the right.
         widths.reverse();
     }
     let border = "<w:top w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"999999\"/>";
-    let mut s = String::from(if rtl {
-        "<w:tbl><w:tblPr><w:bidiVisual/><w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders>"
-    } else {
-        "<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders>"
-    });
+    let mut s = format!("<w:tbl><w:tblPr>{}<w:tblW w:w=\"{total}\" w:type=\"dxa\"/><w:tblBorders>", if rtl { "<w:bidiVisual/>" } else { "" });
     for b in [
         border,
         "<w:left w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"999999\"/>",
@@ -531,7 +684,7 @@ fn docx_table(t: &Table) -> String {
     ] {
         s.push_str(b);
     }
-    s.push_str("</w:tblBorders></w:tblPr><w:tblGrid>");
+    s.push_str("</w:tblBorders><w:tblLayout w:type=\"fixed\"/></w:tblPr><w:tblGrid>");
     for w in &widths {
         s.push_str(&format!("<w:gridCol w:w=\"{w}\"/>"));
     }
@@ -542,13 +695,21 @@ fn docx_table(t: &Table) -> String {
         let mut column = 0usize;
         for c in row.iter() {
             let span = if c.span > 1 { format!("<w:gridSpan w:val=\"{}\"/>", c.span) } else { String::new() };
+            let vmerge = match c.vmerge {
+                VMerge::None => "",
+                VMerge::Restart => "<w:vMerge w:val=\"restart\"/>",
+                VMerge::Continue => "<w:vMerge/>",
+            };
             let w: i64 = widths.iter().skip(column).take(c.span.max(1)).sum();
             column = column.saturating_add(c.span.max(1));
             let ppr = if c.rtl { "<w:pPr><w:bidi/></w:pPr>" } else { "" };
-            s.push_str(&format!(
-                "<w:tc><w:tcPr><w:tcW w:w=\"{w}\" w:type=\"dxa\"/>{span}</w:tcPr><w:p>{ppr}{}</w:p></w:tc>",
-                run_xml(&c.text, c.size, c.bold, c.italic)
-            ));
+            // One paragraph per line of the cell; a cell needs at least one.
+            let paras: String = if c.text.is_empty() {
+                format!("<w:p>{ppr}</w:p>")
+            } else {
+                c.text.split('\n').map(|line| format!("<w:p>{ppr}{}</w:p>", run_xml(line, c.size, c.bold, c.italic))).collect()
+            };
+            s.push_str(&format!("<w:tc><w:tcPr><w:tcW w:w=\"{w}\" w:type=\"dxa\"/>{span}{vmerge}</w:tcPr>{paras}</w:tc>"));
         }
         // Pad the grid so every row covers all columns (Word rejects short rows).
         let used: usize = row.iter().map(|c| c.span).sum();
@@ -592,7 +753,7 @@ pub fn docx(pages: &[Page], title: &str) -> Vec<u8> {
                 if after_table {
                     body.push_str("<w:p/>");
                 }
-                body.push_str(&docx_table(t));
+                body.push_str(&docx_table(t, pw - 2 * mx));
             }
             Item::Img(im) => {
                 let n = media.len() + 1;
@@ -749,6 +910,12 @@ pub fn rtf(pages: &[Page]) -> String {
                     let mut column = 0;
                     for c in row.iter() {
                         column += c.span.max(1);
+                        // A cell merged down several rows: its first row and the rows below.
+                        match c.vmerge {
+                            VMerge::None => {}
+                            VMerge::Restart => s.push_str("\\clvmgf"),
+                            VMerge::Continue => s.push_str("\\clvmrg"),
+                        }
                         if let Some(x) = cellx.get(column.min(cellx.len()).saturating_sub(1)) {
                             s.push_str(&format!("\\cellx{x}"));
                         }
@@ -762,7 +929,9 @@ pub fn rtf(pages: &[Page]) -> String {
                         if c.italic {
                             fmt.push_str("\\i");
                         }
-                        s.push_str(&format!("{{{fmt} {}}}\\cell", rtf_runs(&c.text, size, c.bold, c.italic)));
+                        // Lines of the cell break with `\line` inside one cell paragraph.
+                        let text: Vec<String> = c.text.split('\n').map(|l| rtf_runs(l, size, c.bold, c.italic)).collect();
+                        s.push_str(&format!("{{{fmt} {}}}\\cell", text.join("\\line ")));
                     }
                     s.push_str("\\row\n");
                 }
@@ -787,6 +956,7 @@ mod tests {
             bold,
             italic: false,
             rtl: false,
+            font: None,
         };
         Page {
             width: 612.0,
@@ -802,6 +972,7 @@ mod tests {
                 bytes: b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x02\0\0\0\x03".to_vec(),
                 rect: [72.0, 450.0, 272.0, 600.0],
             }],
+            ..Default::default()
         }
     }
 
@@ -860,6 +1031,7 @@ mod tests {
             bold: false,
             italic: false,
             rtl: false,
+            font: None,
         });
         let xml = part(&docx(&[p.clone()], "Receipt\u{1}"), "word/document.xml");
         assert!(xml.contains(">Total 4.50\tGBP</w:t>"), "{xml}");
@@ -876,7 +1048,15 @@ mod tests {
     #[test]
     fn rtf_escapes_and_sizes() {
         let mut p = page();
-        p.blocks.push(Block { text: "Café {x}".into(), rect: [72.0, 100.0, 200.0, 110.0], size: 10.0, bold: false, italic: true, rtl: false });
+        p.blocks.push(Block {
+            text: "Café {x}".into(),
+            rect: [72.0, 100.0, 200.0, 110.0],
+            size: 10.0,
+            bold: false,
+            italic: true,
+            rtl: false,
+            font: None,
+        });
         let r = rtf(&[p]);
         assert!(r.starts_with("{\\rtf1") && r.ends_with('}'));
         assert!(r.contains("\\fs48\\b Annual Report"));
@@ -892,6 +1072,7 @@ mod tests {
             bold: false,
             italic: false,
             rtl: false,
+            font: None,
         };
         Page {
             width: 612.0,
@@ -914,9 +1095,11 @@ mod tests {
                     bold: false,
                     italic: false,
                     rtl: false,
+                    font: None,
                 },
             ],
             images: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -935,7 +1118,7 @@ mod tests {
         assert!(d.windows(b"word/document.xml".len()).any(|w| w == b"word/document.xml"));
         let (tables, _) = tables(&p.blocks);
         assert_eq!(tables.len(), 1);
-        let table_xml = docx_table(&tables[0]);
+        let table_xml = docx_table(&tables[0], 0);
         assert!(table_xml.contains("<w:tblGrid>"));
         assert!(table_xml.contains("<w:gridSpan w:val=\"2\"/>"), "{table_xml}");
         assert_eq!(table_xml.matches("<w:tr>").count(), 4);
@@ -957,7 +1140,7 @@ mod tests {
             .map(|i| {
                 let (row, col) = (i / 2, i / 2 + i % 2);
                 let (x, y) = (10.0 + col as f64 * 20.0, 10_000.0 - row as f64 * 14.0);
-                Block { text: "x".into(), rect: [x, y, x + 8.0, y + 12.0], size: 11.0, bold: false, italic: false, rtl: false }
+                Block { text: "x".into(), rect: [x, y, x + 8.0, y + 12.0], size: 11.0, bold: false, italic: false, rtl: false, font: None }
             })
             .collect();
         let started = std::time::Instant::now();
@@ -975,6 +1158,7 @@ mod tests {
             bold: false,
             italic: false,
             rtl: false,
+            font: None,
         };
         let p = Page {
             width: 612.0,
@@ -986,6 +1170,7 @@ mod tests {
                 para("Second right block, still a tall flowing paragraph rather than a cell.", 320.0, 400.0),
             ],
             images: Vec::new(),
+            ..Default::default()
         };
         let h = html(&[p], "Paper");
         assert!(!h.contains("<table>"), "tall two-column text must stay paragraphs: {h}");

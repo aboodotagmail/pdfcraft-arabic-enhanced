@@ -708,10 +708,12 @@ mod flatten;
 pub use flatten::flatten;
 pub mod images;
 pub use images::{ImageChange, PageImage, change_image, page_images, reading_images, rect_to_rect, turn_about_centre};
+pub mod rules;
 pub mod text;
+pub use rules::{Rule, page_rules};
 pub use text::{
-    BlockStyle, CharCounts, FontAudit, LineEdit, PageAudit, TextBlock, TextLine, audit_page, reading_blocks, replace_block, replace_line,
-    rewrite_block, text_blocks, text_lines,
+    BlockStyle, CharCounts, FontAudit, LineEdit, PageAudit, TextBlock, TextLine, audit_page, reading_blocks, reading_fragments, replace_block,
+    replace_line, rewrite_block, text_blocks, text_lines,
 };
 pub mod added;
 pub use added::{Added, AddedImage, AddedText, Align, Content, Family, add_content, delete_content, list_added, update_content};

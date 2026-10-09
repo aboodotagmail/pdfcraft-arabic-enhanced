@@ -162,7 +162,7 @@ struct Ts {
     rise: f64,
 }
 
-fn content_streams(doc: &Document, page: &Dict) -> Vec<(Object, Vec<u8>)> {
+pub(crate) fn content_streams(doc: &Document, page: &Dict) -> Vec<(Object, Vec<u8>)> {
     let list: Vec<Object> = match page.get(b"Contents") {
         None => Vec::new(),
         Some(c) => match &*doc.resolve(c) {
@@ -209,7 +209,7 @@ fn splice(data: &[u8], ops: &[Op], mut edit: impl FnMut(usize) -> (Vec<Op>, bool
     out
 }
 
-fn page_dict(doc: &Document, page: usize) -> Result<pdfcraft_model::Page, EditError> {
+pub(crate) fn page_dict(doc: &Document, page: usize) -> Result<pdfcraft_model::Page, EditError> {
     pdfcraft_model::pages(doc).into_iter().nth(page).ok_or(EditError::NoSuchPage(page))
 }
 
@@ -500,7 +500,7 @@ pub fn text_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditErro
         let ops = parse(&data).ops;
         let mut last = None;
         for s in interpret(doc, &ops, &fonts_res, &mut cache, &mut carry, None) {
-            add_shown(&mut lines, &mut last, s, si);
+            add_shown(&mut lines, &mut last, s, si, LINE_JOIN_EM);
         }
     }
     // Lines of only spaces aren't editable text.
@@ -604,7 +604,12 @@ fn shaped_line_ops(
 
 /// The line `s` continues, or a new one: `last` is the previous run of the same stream
 /// (`bt`, baseline, end x, size).
-fn add_shown(lines: &mut Vec<TextLine>, last: &mut Option<(usize, f64, f64, f64)>, s: Shown, stream: usize) {
+/// Runs on one baseline join into a line across gaps narrower than this many font sizes.
+const LINE_JOIN_EM: f64 = 3.0;
+/// The narrower gap fragments (table cells, columns) are split at: wider than any word space.
+const FRAGMENT_JOIN_EM: f64 = 0.8;
+
+fn add_shown(lines: &mut Vec<TextLine>, last: &mut Option<(usize, f64, f64, f64)>, s: Shown, stream: usize, join_em: f64) {
     let joins = last.is_some_and(|(bt, base, end, size)| {
         bt == s.bt
             && lines.last().is_some_and(|l| l.font.as_bytes() == s.font.as_slice())
@@ -613,7 +618,7 @@ fn add_shown(lines: &mut Vec<TextLine>, last: &mut Option<(usize, f64, f64, f64)
                 .is_some_and(|l| (s.size - l.size).abs() < 0.01 && s.bold == l.bold && s.italic == l.italic && fill_color(&s.state.fill) == l.color)
             && (s.baseline - base).abs() < size * 0.3
             && s.start_x > end - size
-            && s.start_x - end < size * 3.0
+            && s.start_x - end < size * join_em
     });
     if joins && let Some(l) = lines.last_mut() {
         let gap = s.start_x - last.map_or(s.start_x, |x| x.2);
@@ -714,14 +719,15 @@ pub(crate) fn form_call(doc: &Document, resources: &Dict, name: &[u8], ctm: Matr
 /// [`text_lines`] leaves out because it can only rewrite the page's own streams). Lines from a
 /// form carry a stream number past the page's streams, one per form drawn.
 fn reading_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditError> {
-    reading_lines_with(doc, page, false)
+    reading_lines_with(doc, page, false, LINE_JOIN_EM)
 }
 
 /// [`reading_lines`]; `keep_empty` also keeps lines with no decoded text (every code unmapped),
 /// unordered, for [`audit_page`].
-fn reading_lines_with(doc: &Document, page: usize, keep_empty: bool) -> Result<Vec<TextLine>, EditError> {
+fn reading_lines_with(doc: &Document, page: usize, keep_empty: bool, join_em: f64) -> Result<Vec<TextLine>, EditError> {
     struct Walk<'a> {
         doc: &'a Document,
+        join_em: f64,
         lines: Vec<TextLine>,
         next_stream: usize,
         path: Vec<pdfcraft_cos::ObjRef>,
@@ -740,7 +746,7 @@ fn reading_lines_with(doc: &Document, page: usize, keep_empty: bool) -> Result<V
                 // Text after a form starts a new line.
                 last = None;
             }
-            add_shown(&mut w.lines, &mut last, s, stream);
+            add_shown(&mut w.lines, &mut last, s, stream, w.join_em);
         }
         for (_, name, ts) in forms {
             enter(w, resources, &name, ts);
@@ -768,7 +774,7 @@ fn reading_lines_with(doc: &Document, page: usize, keep_empty: bool) -> Result<V
     let p = page_dict(doc, page)?;
     let res = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
     let streams = content_streams(doc, &p.dict);
-    let mut w = Walk { doc, lines: Vec::new(), next_stream: streams.len(), path: Vec::new(), calls: 0 };
+    let mut w = Walk { doc, join_em, lines: Vec::new(), next_stream: streams.len(), path: Vec::new(), calls: 0 };
     let mut carry = Carry::new();
     for (si, (_, data)) in streams.into_iter().enumerate() {
         walk(&mut w, &parse(&data).ops, &res, &mut carry, si);
@@ -1139,7 +1145,7 @@ pub struct PageAudit {
 /// [`PageAudit`] for page `page` (0-based).
 pub fn audit_page(doc: &Document, page: usize) -> Result<PageAudit, EditError> {
     let mut out = PageAudit::default();
-    for l in reading_lines_with(doc, page, true)? {
+    for l in reading_lines_with(doc, page, true, LINE_JOIN_EM)? {
         out.codes = out.codes.saturating_add(l.codes);
         out.unmapped = out.unmapped.saturating_add(l.unmapped);
         out.chars.add(&l.text);
@@ -1152,6 +1158,28 @@ pub fn audit_page(doc: &Document, page: usize) -> Result<PageAudit, EditError> {
         }
     }
     Ok(out)
+}
+
+/// The text of a page in fragments, for finding tables (Export to Word, HTML and RTF): runs on
+/// one baseline join only across gaps narrower than a word space or so, never across the gap
+/// between two table cells or columns. Each fragment is one line, in reading order inside
+/// (UAX #9), with the page's text drawn by form XObjects included.
+pub fn reading_fragments(doc: &Document, page: usize) -> Result<Vec<TextBlock>, EditError> {
+    Ok(reading_lines_with(doc, page, false, FRAGMENT_JOIN_EM)?
+        .into_iter()
+        .map(|l| TextBlock {
+            text: l.text.trim().to_string(),
+            rect: l.rect,
+            base_font: l.base_font,
+            size: l.size,
+            bold: l.bold,
+            italic: l.italic,
+            color: l.color,
+            rtl: l.rtl,
+            lines: Vec::new(),
+        })
+        .filter(|b| !b.text.is_empty())
+        .collect())
 }
 
 /// The paragraphs on a page as a reader sees them, including text drawn by form XObjects

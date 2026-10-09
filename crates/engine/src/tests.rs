@@ -2185,3 +2185,131 @@ fn office_export_writes_letters_and_counts_unreadable_characters() {
     assert!(texts.iter().any(|t| t == "سلم"), "{texts:?}");
     assert!(texts.iter().all(|t| !t.chars().any(|c| ('\u{FE70}'..='\u{FEFF}').contains(&c))), "{texts:?}");
 }
+
+/// A synthetic word-processor style page: an Arabic heading, then a right-to-left table with
+/// borders (horizontal rules as thin filled boxes, vertical ones stroked). On the page, columns
+/// right to left are 380–500, 260–380 and 100–260; the header's second cell spans the two left
+/// columns (no rule at x 260 in the first row) and the first column's cell in rows 2–3 is one
+/// cell (no rule between them at x 380–500). Text is real embedded Arabic (Noto Sans Arabic).
+/// `None` without the craft-fonts Arabic face.
+fn ruled_arabic_table_pdf() -> Option<Vec<u8>> {
+    use pdfcraft_cos::{Dict, Document, Object, Stream};
+    use pdfcraft_fonts::layout::BaseDirection;
+    let mut u = pdfcraft_fonts::paint::UnicodeLines::new().ok()?;
+    let mut doc = Document::new_empty();
+    let mut ops = String::new();
+    // Text right-aligned in a box whose right edge is `right`.
+    let mut put = |ops: &mut String, text: &str, right: f64, baseline: f64, size: f64| {
+        let (line, width) = u.line_in(text, size, BaseDirection::Rtl).unwrap();
+        ops.push_str(&u.ops(&line, "PCUni", right - width - 6.0, baseline, size).unwrap());
+    };
+    put(&mut ops, "تقرير المبيعات الشهري", 500.0, 760.0, 18.0);
+    let (top, h) = (700.0, 30.0);
+    let rows = [["الاسم", "التفاصيل", ""], ["قلم أزرق", "٣", "١٠"], ["", "٥", "٢٠"]];
+    for (i, row) in rows.iter().enumerate() {
+        let base = top - h * (i as f64) - 20.0;
+        for (text, right) in row.iter().zip([500.0, 380.0, 260.0]) {
+            if !text.is_empty() {
+                put(&mut ops, text, right, base, 12.0);
+            }
+        }
+    }
+    // Horizontal rules: thin filled boxes; the one between rows 2 and 3 skips the first column.
+    ops.push_str("0 g\n");
+    for (y, x0, x1) in [(700.0, 100.0, 500.0), (670.0, 100.0, 500.0), (640.0, 100.0, 380.0), (610.0, 100.0, 500.0)] {
+        ops.push_str(&format!("{x0} {} {} 0.5 re f\n", y - 0.25, x1 - x0));
+    }
+    // Vertical rules, stroked; the one at x 260 skips the first row.
+    ops.push_str("0.5 w\n");
+    for (x, y0, y1) in [(100.0, 610.0, 700.0), (260.0, 610.0, 670.0), (380.0, 610.0, 700.0), (500.0, 610.0, 700.0)] {
+        ops.push_str(&format!("{x} {y0} m {x} {y1} l S\n"));
+    }
+    let font = u.write(&mut doc).ok()?;
+    let content = doc.add(Object::Stream(Stream::flate(Dict::new(), ops.as_bytes())));
+    let mut fonts = Dict::new();
+    fonts.set(b"PCUni".to_vec(), Object::Ref(font));
+    let mut res = Dict::new();
+    res.set(b"Font".to_vec(), Object::Dict(fonts));
+    let root = doc.root()?;
+    let pages = doc.get(root).as_dict()?.reference(b"Pages")?;
+    let mut page = Dict::new();
+    page.set(b"Type".to_vec(), Object::name("Page"));
+    page.set(b"Parent".to_vec(), Object::Ref(pages));
+    page.set(b"MediaBox".to_vec(), Object::Array([0, 0, 595, 842].map(Object::Int).to_vec()));
+    page.set(b"Resources".to_vec(), Object::Dict(res));
+    page.set(b"Contents".to_vec(), Object::Ref(content));
+    let page = doc.add(Object::Dict(page));
+    doc.update_dict(pages, |d| {
+        d.set(b"Kids".to_vec(), Object::Array(vec![Object::Ref(page)]));
+        d.set(b"Count".to_vec(), Object::Int(1));
+    })
+    .ok()?;
+    pdfcraft_cos::write_full(&doc, &Default::default()).ok()
+}
+
+/// A bordered right-to-left table comes out of Word export as one table: three columns of the
+/// page's widths, listed from the right, the merged header cell spanning two columns and the
+/// merged first-column cell spanning two rows, text in reading order, and nothing of the table
+/// repeated as paragraphs.
+#[test]
+fn ruled_arabic_table_exports_as_one_word_table() {
+    let Some(pdf) = ruled_arabic_table_pdf() else {
+        eprintln!("skipping: built without the craft-fonts Arabic face (set CRAFT_FONTS_DIR)");
+        return;
+    };
+    if let Ok(dir) = std::env::var("PDFCRAFT_EXPORT_DIR") {
+        std::fs::write(format!("{dir}/ruled-arabic-table.pdf"), &pdf).unwrap();
+    }
+    let mut s = Session::new();
+    let id = s.open("t.pdf", None, std::sync::Arc::new(pdf), None).unwrap();
+    let d = s.get(id).unwrap();
+    let pages = d.export_pages();
+    assert!(pages[0].rules.len() >= 8, "{:?}", pages[0].rules);
+    let docx = d.export_office(compare::OfficeFormat::Docx);
+    if let Ok(dir) = std::env::var("PDFCRAFT_EXPORT_DIR") {
+        std::fs::write(format!("{dir}/ruled-arabic-table.docx"), &docx).unwrap();
+    }
+    let xml = docx_part(&docx, "word/document.xml");
+    assert_eq!(xml.matches("<w:tbl>").count(), 1, "{xml}");
+    assert!(xml.contains("<w:bidiVisual/>"));
+    assert_eq!(xml.matches("<w:tr>").count(), 3);
+    // Grid from the right: 120, 120 and 160 points wide.
+    assert!(xml.contains("<w:tblGrid><w:gridCol w:w=\"2400\"/><w:gridCol w:w=\"2400\"/><w:gridCol w:w=\"3200\"/></w:tblGrid>"), "{xml}");
+    assert!(xml.contains("<w:gridSpan w:val=\"2\"/>"));
+    assert_eq!(xml.matches("<w:vMerge w:val=\"restart\"/>").count(), 1);
+    assert_eq!(xml.matches("<w:vMerge/>").count(), 1);
+    let order = ["الاسم", "التفاصيل", "قلم أزرق", "١٠", "٢٠"];
+    let at: Vec<usize> = order.iter().map(|t| xml.find(t).unwrap_or_else(|| panic!("{t} missing: {xml}"))).collect();
+    assert!(at.windows(2).all(|w| w[0] < w[1]), "reading order {at:?}");
+    // The heading is a paragraph; the cells are not repeated as paragraphs.
+    assert!(xml.contains("تقرير المبيعات الشهري"));
+    assert_eq!(xml.matches("قلم أزرق").count(), 1);
+}
+
+/// One part of a .docx (zip written by pdfcraft-export: stored or deflated entries).
+fn docx_part(zip: &[u8], name: &str) -> String {
+    use std::io::Read;
+    let mut at = 0usize;
+    while let Some(h) = zip.get(at..at + 30) {
+        if h[..4] != *b"PK\x03\x04" {
+            break;
+        }
+        let method = u16::from_le_bytes([h[8], h[9]]);
+        let size = u32::from_le_bytes([h[18], h[19], h[20], h[21]]) as usize;
+        let nlen = u16::from_le_bytes([h[26], h[27]]) as usize;
+        let xlen = u16::from_le_bytes([h[28], h[29]]) as usize;
+        let fname = String::from_utf8_lossy(&zip[at + 30..at + 30 + nlen]).into_owned();
+        let data = &zip[at + 30 + nlen + xlen..at + 30 + nlen + xlen + size];
+        if fname == name {
+            let mut out = String::new();
+            if method == 8 {
+                flate2::read::DeflateDecoder::new(data).read_to_string(&mut out).unwrap();
+            } else {
+                out = String::from_utf8(data.to_vec()).unwrap();
+            }
+            return out;
+        }
+        at += 30 + nlen + xlen + size;
+    }
+    panic!("{name} not in the archive");
+}
