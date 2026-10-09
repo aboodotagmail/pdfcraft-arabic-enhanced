@@ -122,6 +122,35 @@ foreach ($f in 'arabic.pdf', 'arabic.png') {
 }
 Write-Output 'ok installed pdfcraft-cli: Arabic added, embedded, saved, extracted and found'
 
+# 3c. Arabic PDF to Word: the saved Arabic PDF exports to a .docx whose text is the Arabic
+# letters (no unreadable characters), right to left, in one section for the one page, with the
+# PDF's font named (not embedded).
+$export = '[{"tool":"doc_open","args":{"path":"arabic.pdf"}},{"tool":"doc_export_office","args":{"doc":1,"path":"arabic.docx"}}]'
+[System.IO.File]::WriteAllText((Join-Path $Smoke 'export.json'), $export, [System.Text.UTF8Encoding]::new($false))
+$out = & $Cli run --script (Join-Path $Smoke 'export.json') --root $Smoke 2>&1 | Out-String
+Set-Content -LiteralPath (Join-Path $Smoke 'cli-export.txt') -Value $out -Encoding utf8
+if ($LASTEXITCODE -ne 0) { Write-Output $out; throw "pdfcraft-cli run (Word export) exited $LASTEXITCODE" }
+if ($out -notmatch '"unreadable_chars":\s*0') { Write-Output $out; throw 'the Word export has unreadable characters' }
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zip = [System.IO.Compression.ZipFile]::OpenRead((Join-Path $Smoke 'arabic.docx'))
+try {
+  $part = $zip.GetEntry('word/document.xml')
+  if (-not $part) { throw 'arabic.docx has no word/document.xml' }
+  $reader = [System.IO.StreamReader]::new($part.Open(), [System.Text.Encoding]::UTF8)
+  $xml = $reader.ReadToEnd()
+  $reader.Dispose()
+  $embedded = @($zip.Entries | Where-Object { $_.FullName -like 'word/fonts/*' })
+} finally {
+  $zip.Dispose()
+}
+[void][xml]$xml
+if ($xml -notmatch 'مرحبا' -or $xml -notmatch 'بالعالم') { throw 'arabic.docx lacks the Arabic text' }
+if ($xml -notmatch '<w:bidi/>' -or $xml -notmatch '<w:rtl/>') { throw 'arabic.docx is not marked right to left' }
+if (([regex]::Matches($xml, '<w:sectPr>')).Count -ne 1) { throw 'arabic.docx should have one section for the one page' }
+if ($xml -notmatch 'w:cs="Noto Sans Arabic"') { throw 'arabic.docx does not name the PDF font' }
+if ($embedded.Count -ne 0) { throw 'arabic.docx embeds fonts' }
+Write-Output 'ok installed pdfcraft-cli: Arabic PDF exported to Word (letters, right to left, one section, font named)'
+
 # 4. The installed app starts and draws its window (answers a screenshot over the control channel).
 $control = Join-Path $Smoke 'control.json'
 $app = Start-Process -FilePath $Exe -ArgumentList '--control', "`"$control`"", "`"$(Join-Path $Smoke 'hello.pdf')`"" -PassThru
