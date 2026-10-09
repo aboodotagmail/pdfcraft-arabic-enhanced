@@ -21,6 +21,8 @@ pub struct Block {
     pub size: f64,
     pub bold: bool,
     pub italic: bool,
+    /// The paragraph reads right to left (Arabic, Hebrew); `text` is in logical order.
+    pub rtl: bool,
 }
 
 /// An image of a page.
@@ -49,6 +51,8 @@ pub struct Cell {
     pub bold: bool,
     pub italic: bool,
     pub span: usize,
+    /// The cell's text reads right to left.
+    pub rtl: bool,
 }
 
 /// A table detected from the page's text layout: rows of cells, and the left edge of each
@@ -58,6 +62,78 @@ pub struct Table {
     pub rect: [f64; 4],
     pub cols: Vec<f64>,
     pub rows: Vec<Vec<Cell>>,
+}
+
+impl Table {
+    /// A right-to-left table: most of its non-empty cells read right to left. Its first logical
+    /// column is then the rightmost one.
+    pub fn rtl(&self) -> bool {
+        let cells = self.rows.iter().flatten().filter(|c| !c.text.is_empty());
+        let (rtl, all) = cells.fold((0usize, 0usize), |(r, a), c| (r + usize::from(c.rtl), a + 1));
+        all > 0 && rtl * 2 > all
+    }
+
+    /// A row's cells in the table's logical order: left to right for a left-to-right table;
+    /// for a right-to-left one, padded to the full grid (holes stay where they are on the page)
+    /// and then right to left.
+    fn logical_row<'a>(&self, row: &'a [Cell]) -> std::borrow::Cow<'a, [Cell]> {
+        if !self.rtl() {
+            return std::borrow::Cow::Borrowed(row);
+        }
+        let mut cells = row.to_vec();
+        let used: usize = row.iter().map(|c| c.span.max(1)).sum();
+        for _ in used..self.cols.len() {
+            cells.push(Cell { text: String::new(), size: 11.0, bold: false, italic: false, span: 1, rtl: true });
+        }
+        cells.reverse();
+        std::borrow::Cow::Owned(cells)
+    }
+}
+
+/// Whether `c` is written right to left (bidi class R or AL; Arabic-Indic digits, AN, go with
+/// them in a run).
+fn rtl_char(c: char) -> bool {
+    use unicode_bidi::BidiClass::{AL, AN, R};
+    matches!(unicode_bidi::bidi_class(c), R | AL | AN)
+}
+
+/// `text` cut into runs that are right to left or not: right-to-left letters and the marks,
+/// spaces and punctuation that follow them form one run, so Word and RTF readers give them
+/// complex-script formatting while Latin keeps its own. The runs stay in logical order.
+fn direction_runs(text: &str) -> Vec<(bool, &str)> {
+    use unicode_bidi::BidiClass::{EN, L};
+    let mut out: Vec<(bool, &str)> = Vec::new();
+    let mut start = 0;
+    let mut cur: Option<bool> = None;
+    for (i, c) in text.char_indices() {
+        let class = unicode_bidi::bidi_class(c);
+        let dir = if rtl_char(c) {
+            Some(true)
+        } else if matches!(class, L | EN) {
+            Some(false)
+        } else {
+            None
+        };
+        match (cur, dir) {
+            (Some(a), Some(b)) if a != b => {
+                if let Some(t) = text.get(start..i) {
+                    out.push((a, t));
+                }
+                start = i;
+                cur = Some(b);
+            }
+            (None, Some(b)) => cur = Some(b),
+            _ => {}
+        }
+    }
+    if let Some(t) = text.get(start..).filter(|t| !t.is_empty()) {
+        out.push((cur.unwrap_or(false), t));
+    }
+    out
+}
+
+fn has_rtl(text: &str) -> bool {
+    text.chars().any(rtl_char)
 }
 
 /// What goes into the output, in order.
@@ -198,7 +274,7 @@ fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
                 let b = &blocks[bi];
                 let Some(slot) = edges.iter().position(|e| (*e - b.rect[0]).abs() <= COL_TOL) else { continue };
                 let span = edges[slot + 1..].iter().filter(|e| **e > b.rect[0] + COL_TOL && **e < b.rect[2] - COL_TOL).count() + 1;
-                let cell = Cell { text: b.text.trim().to_string(), size: b.size, bold: b.bold, italic: b.italic, span };
+                let cell = Cell { text: b.text.trim().to_string(), size: b.size, bold: b.bold, italic: b.italic, span, rtl: b.rtl };
                 match &mut slots[slot] {
                     Some(c) => {
                         c.text.push(' ');
@@ -219,7 +295,7 @@ fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
                     }
                     None => {
                         column += 1;
-                        materialized.push(Cell { text: String::new(), size: 11.0, bold: false, italic: false, span: 1 });
+                        materialized.push(Cell { text: String::new(), size: 11.0, bold: false, italic: false, span: 1, rtl: false });
                     }
                 }
             }
@@ -360,16 +436,18 @@ table{{border-collapse:collapse;margin:1em 0}}td,th{{border:1px solid #999;paddi
                 if b.bold && lvl == 0 {
                     t = format!("<strong>{t}</strong>");
                 }
+                let dir = if b.rtl { " dir=\"rtl\"" } else { "" };
                 match lvl {
-                    0 => s.push_str(&format!("<p>{t}</p>\n")),
-                    l => s.push_str(&format!("<h{l}>{t}</h{l}>\n")),
+                    0 => s.push_str(&format!("<p{dir}>{t}</p>\n")),
+                    l => s.push_str(&format!("<h{l}{dir}>{t}</h{l}>\n")),
                 }
             }
             Item::Table(t) => {
-                s.push_str("<table>\n");
+                let rtl = t.rtl();
+                s.push_str(if rtl { "<table dir=\"rtl\" style=\"margin-left:auto\">\n" } else { "<table>\n" });
                 for row in &t.rows {
                     s.push_str("<tr>");
-                    for c in row {
+                    for c in t.logical_row(row).iter() {
                         let mut body = esc(&c.text);
                         if c.italic {
                             body = format!("<em>{body}</em>");
@@ -378,7 +456,13 @@ table{{border-collapse:collapse;margin:1em 0}}td,th{{border:1px solid #999;paddi
                             body = format!("<strong>{body}</strong>");
                         }
                         let span = if c.span > 1 { format!(" colspan=\"{}\"", c.span) } else { String::new() };
-                        s.push_str(&format!("<td{span}>{body}</td>"));
+                        let dir = match (c.rtl, rtl) {
+                            _ if c.text.is_empty() => "",
+                            (true, false) => " dir=\"rtl\"",
+                            (false, true) => " dir=\"ltr\"",
+                            _ => "",
+                        };
+                        s.push_str(&format!("<td{span}{dir}>{body}</td>"));
                     }
                     s.push_str("</tr>\n");
                 }
@@ -396,17 +480,28 @@ table{{border-collapse:collapse;margin:1em 0}}td,th{{border:1px solid #999;paddi
 }
 
 /// A formatted text run (shared by paragraphs and table cells).
+/// Text with right-to-left letters is split into runs by direction; the right-to-left ones are
+/// marked `w:rtl` and carry the complex-script bold, italic and size Word uses for them.
 fn run_xml(text: &str, size: f64, bold: bool, italic: bool) -> String {
-    let mut rpr = String::new();
-    if bold {
-        rpr.push_str("<w:b/>");
-    }
-    if italic {
-        rpr.push_str("<w:i/>");
-    }
     let half_points = if size.is_finite() { (size * 2.0).round().clamp(2.0, 3276.0) as i64 } else { 24 };
-    rpr.push_str(&format!("<w:sz w:val=\"{half_points}\"/>"));
-    format!("<w:r><w:rPr>{rpr}</w:rPr><w:t xml:space=\"preserve\">{}</w:t></w:r>", esc(text))
+    let one = |text: &str, rtl: bool| {
+        let mut rpr = String::new();
+        if bold {
+            rpr.push_str(if rtl { "<w:b/><w:bCs/>" } else { "<w:b/>" });
+        }
+        if italic {
+            rpr.push_str(if rtl { "<w:i/><w:iCs/>" } else { "<w:i/>" });
+        }
+        rpr.push_str(&format!("<w:sz w:val=\"{half_points}\"/>"));
+        if rtl {
+            rpr.push_str(&format!("<w:szCs w:val=\"{half_points}\"/><w:rtl/>"));
+        }
+        format!("<w:r><w:rPr>{rpr}</w:rPr><w:t xml:space=\"preserve\">{}</w:t></w:r>", esc(text))
+    };
+    if !has_rtl(text) {
+        return one(text, false);
+    }
+    direction_runs(text).into_iter().map(|(rtl, t)| one(t, rtl)).collect()
 }
 
 /// One Word table: explicit single borders (so it renders without a table style), a grid sized
@@ -414,9 +509,18 @@ fn run_xml(text: &str, size: f64, bold: bool, italic: bool) -> String {
 fn docx_table(t: &Table) -> String {
     let mut edges = t.cols.clone();
     edges.push(t.rect[2]);
-    let widths: Vec<i64> = edges.windows(2).map(|w| ((w[1] - w[0]).max(20.0) * 20.0).round().clamp(60.0, 31680.0) as i64).collect();
+    let rtl = t.rtl();
+    let mut widths: Vec<i64> = edges.windows(2).map(|w| ((w[1] - w[0]).max(20.0) * 20.0).round().clamp(60.0, 31680.0) as i64).collect();
+    if rtl {
+        // A `bidiVisual` table lists its grid from the right.
+        widths.reverse();
+    }
     let border = "<w:top w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"999999\"/>";
-    let mut s = String::from("<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders>");
+    let mut s = String::from(if rtl {
+        "<w:tbl><w:tblPr><w:bidiVisual/><w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders>"
+    } else {
+        "<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders>"
+    });
     for b in [
         border,
         "<w:left w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"999999\"/>",
@@ -434,11 +538,15 @@ fn docx_table(t: &Table) -> String {
     s.push_str("</w:tblGrid>");
     for row in &t.rows {
         s.push_str("<w:tr>");
-        for c in row {
+        let row = t.logical_row(row);
+        let mut column = 0usize;
+        for c in row.iter() {
             let span = if c.span > 1 { format!("<w:gridSpan w:val=\"{}\"/>", c.span) } else { String::new() };
-            let w: i64 = widths.iter().take(c.span.min(widths.len())).sum();
+            let w: i64 = widths.iter().skip(column).take(c.span.max(1)).sum();
+            column = column.saturating_add(c.span.max(1));
+            let ppr = if c.rtl { "<w:pPr><w:bidi/></w:pPr>" } else { "" };
             s.push_str(&format!(
-                "<w:tc><w:tcPr><w:tcW w:w=\"{w}\" w:type=\"dxa\"/>{span}</w:tcPr><w:p>{}</w:p></w:tc>",
+                "<w:tc><w:tcPr><w:tcW w:w=\"{w}\" w:type=\"dxa\"/>{span}</w:tcPr><w:p>{ppr}{}</w:p></w:tc>",
                 run_xml(&c.text, c.size, c.bold, c.italic)
             ));
         }
@@ -471,10 +579,12 @@ pub fn docx(pages: &[Page], title: &str) -> Vec<u8> {
     for it in items(pages) {
         match &it {
             Item::Para(b, lvl) => {
+                let bidi = if b.rtl { "<w:bidi/>" } else { "" };
                 let style = match lvl {
-                    1 => "<w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr>",
-                    2 => "<w:pPr><w:pStyle w:val=\"Heading2\"/></w:pPr>",
-                    _ => "",
+                    1 => format!("<w:pPr><w:pStyle w:val=\"Heading1\"/>{bidi}</w:pPr>"),
+                    2 => format!("<w:pPr><w:pStyle w:val=\"Heading2\"/>{bidi}</w:pPr>"),
+                    _ if b.rtl => "<w:pPr><w:bidi/></w:pPr>".to_string(),
+                    _ => String::new(),
                 };
                 body.push_str(&format!("<w:p>{style}{}</w:p>", run(b)));
             }
@@ -582,6 +692,25 @@ fn rtf_text(s: &str) -> String {
     o
 }
 
+/// RTF text with right-to-left runs marked `\rtlch` and given the associated (complex-script)
+/// size, bold and italic RTF readers use for them; text without right-to-left letters is as before.
+fn rtf_runs(text: &str, size: i64, bold: bool, italic: bool) -> String {
+    if !has_rtl(text) {
+        return rtf_text(text);
+    }
+    let mut assoc = format!("\\afs{size}");
+    if bold {
+        assoc.push_str("\\ab");
+    }
+    if italic {
+        assoc.push_str("\\ai");
+    }
+    direction_runs(text)
+        .into_iter()
+        .map(|(rtl, t)| if rtl { format!("{{\\rtlch{assoc} {}}}", rtf_text(t)) } else { format!("{{\\ltrch {}}}", rtf_text(t)) })
+        .collect()
+}
+
 /// Rich Text Format: paragraphs with their sizes and bold/italic, real table rows, page breaks
 /// between pages (images are left out).
 pub fn rtf(pages: &[Page]) -> String {
@@ -589,39 +718,51 @@ pub fn rtf(pages: &[Page]) -> String {
     for it in items(pages) {
         match it {
             Item::Para(b, _) => {
-                let mut fmt = format!("\\fs{}", (b.size * 2.0).round() as i64);
+                let size = (b.size * 2.0).round() as i64;
+                let mut fmt = format!("\\fs{size}");
                 if b.bold {
                     fmt.push_str("\\b");
                 }
                 if b.italic {
                     fmt.push_str("\\i");
                 }
-                s.push_str(&format!("{{\\pard{fmt} {}\\par}}\n", rtf_text(&b.text)));
+                // RTF alignment is absolute: a right-to-left paragraph starts on the right.
+                let dir = if b.rtl { "\\rtlpar\\qr" } else { "" };
+                s.push_str(&format!("{{\\pard{dir}{fmt} {}\\par}}\n", rtf_runs(&b.text, size, b.bold, b.italic)));
             }
             Item::Table(t) => {
                 let mut edges = t.cols.clone();
                 edges.push(t.rect[2]);
-                let cellx: Vec<i64> = edges.iter().skip(1).map(|e| (e * 20.0).round() as i64).collect();
+                let rtl = t.rtl();
+                // A right-to-left row (`\rtlrow`) lists its cells from the right, each boundary
+                // measured from the table's right edge.
+                let cellx: Vec<i64> = if rtl {
+                    edges.iter().rev().skip(1).map(|e| ((t.rect[2] - e) * 20.0).round() as i64).collect()
+                } else {
+                    edges.iter().skip(1).map(|e| (e * 20.0).round() as i64).collect()
+                };
                 for row in &t.rows {
-                    s.push_str("\\trowd\\trgaph108");
+                    let row = t.logical_row(row);
+                    s.push_str(if rtl { "\\trowd\\rtlrow\\trgaph108" } else { "\\trowd\\trgaph108" });
                     // The row's cell boundaries come first: each cell ends at the right edge of
                     // the last grid column it spans.
                     let mut column = 0;
-                    for c in row {
+                    for c in row.iter() {
                         column += c.span.max(1);
                         if let Some(x) = cellx.get(column.min(cellx.len()).saturating_sub(1)) {
                             s.push_str(&format!("\\cellx{x}"));
                         }
                     }
-                    for c in row {
-                        let mut fmt = format!("\\intbl\\fs{}", (c.size * 2.0).round() as i64);
+                    for c in row.iter() {
+                        let size = (c.size * 2.0).round() as i64;
+                        let mut fmt = format!("\\intbl{}\\fs{size}", if c.rtl { "\\rtlpar\\qr" } else { "" });
                         if c.bold {
                             fmt.push_str("\\b");
                         }
                         if c.italic {
                             fmt.push_str("\\i");
                         }
-                        s.push_str(&format!("{{{fmt} {}}}\\cell", rtf_text(&c.text)));
+                        s.push_str(&format!("{{{fmt} {}}}\\cell", rtf_runs(&c.text, size, c.bold, c.italic)));
                     }
                     s.push_str("\\row\n");
                 }
@@ -639,7 +780,14 @@ mod tests {
     use super::*;
 
     fn page() -> Page {
-        let b = |t: &str, y: f64, size: f64, bold: bool| Block { text: t.into(), rect: [72.0, y, 500.0, y + size], size, bold, italic: false };
+        let b = |t: &str, y: f64, size: f64, bold: bool| Block {
+            text: t.into(),
+            rect: [72.0, y, 500.0, y + size],
+            size,
+            bold,
+            italic: false,
+            rtl: false,
+        };
         Page {
             width: 612.0,
             height: 792.0,
@@ -711,6 +859,7 @@ mod tests {
             size: f64::NAN,
             bold: false,
             italic: false,
+            rtl: false,
         });
         let xml = part(&docx(&[p.clone()], "Receipt\u{1}"), "word/document.xml");
         assert!(xml.contains(">Total 4.50\tGBP</w:t>"), "{xml}");
@@ -727,7 +876,7 @@ mod tests {
     #[test]
     fn rtf_escapes_and_sizes() {
         let mut p = page();
-        p.blocks.push(Block { text: "Café {x}".into(), rect: [72.0, 100.0, 200.0, 110.0], size: 10.0, bold: false, italic: true });
+        p.blocks.push(Block { text: "Café {x}".into(), rect: [72.0, 100.0, 200.0, 110.0], size: 10.0, bold: false, italic: true, rtl: false });
         let r = rtf(&[p]);
         assert!(r.starts_with("{\\rtf1") && r.ends_with('}'));
         assert!(r.contains("\\fs48\\b Annual Report"));
@@ -736,7 +885,14 @@ mod tests {
 
     /// A 3-column table with a spanning header row and a hole in the last row.
     fn table_page() -> Page {
-        let cell = |t: &str, x: f64, y: f64, w: f64| Block { text: t.into(), rect: [x, y, x + w, y + 12.0], size: 11.0, bold: false, italic: false };
+        let cell = |t: &str, x: f64, y: f64, w: f64| Block {
+            text: t.into(),
+            rect: [x, y, x + w, y + 12.0],
+            size: 11.0,
+            bold: false,
+            italic: false,
+            rtl: false,
+        };
         Page {
             width: 612.0,
             height: 792.0,
@@ -757,6 +913,7 @@ mod tests {
                     size: 11.0,
                     bold: false,
                     italic: false,
+                    rtl: false,
                 },
             ],
             images: Vec::new(),
@@ -800,7 +957,7 @@ mod tests {
             .map(|i| {
                 let (row, col) = (i / 2, i / 2 + i % 2);
                 let (x, y) = (10.0 + col as f64 * 20.0, 10_000.0 - row as f64 * 14.0);
-                Block { text: "x".into(), rect: [x, y, x + 8.0, y + 12.0], size: 11.0, bold: false, italic: false }
+                Block { text: "x".into(), rect: [x, y, x + 8.0, y + 12.0], size: 11.0, bold: false, italic: false, rtl: false }
             })
             .collect();
         let started = std::time::Instant::now();
@@ -817,6 +974,7 @@ mod tests {
             size: 11.0,
             bold: false,
             italic: false,
+            rtl: false,
         };
         let p = Page {
             width: 612.0,

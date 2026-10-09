@@ -6862,8 +6862,8 @@ milestone = "M10"
 status = "partial"
 commands = ["export.docx"]
 tools = ["doc_export_office"]
-evidence = ["crates/export/src/lib.rs::docx_is_a_word_package", "crates/export/src/lib.rs::grid_text_becomes_a_real_table_in_every_format", "crates/export/src/lib.rs::word_opens_text_with_control_characters_and_long_pages", "crates/engine/src/tests.rs::exporting_office_files_keeps_images", "crates/automation/tests/automation.rs::exporting_to_word_html_and_rtf", "crates/ui-egui/tests/compare.rs::export_to_word_html_and_rtf"]
-notes = "Flowing Word document: paragraphs, Heading 1/2 from larger text, bold/italic, images inline, page breaks, and detected tables with spans/empty cells; checked with macOS textutil and opened in Microsoft Word (Windows). Characters XML forbids are dropped; the page size stays within Word's 22 in. Not yet: columns, fonts and colours, exact layout mode."
+evidence = ["crates/export/src/lib.rs::docx_is_a_word_package", "crates/export/src/lib.rs::grid_text_becomes_a_real_table_in_every_format", "crates/export/src/lib.rs::word_opens_text_with_control_characters_and_long_pages", "crates/engine/src/tests.rs::exporting_office_files_keeps_images", "crates/automation/tests/automation.rs::exporting_to_word_html_and_rtf", "crates/ui-egui/tests/compare.rs::export_to_word_html_and_rtf", "crates/export/tests/rtl.rs::arabic_exports_right_to_left_in_every_format"]
+notes = "Flowing Word document: paragraphs, Heading 1/2 from larger text, bold/italic, images inline, page breaks, and detected tables with spans/empty cells; checked with macOS textutil and opened in Microsoft Word (Windows). Characters XML forbids are dropped; the page size stays within Word's 22 in. Not yet: columns, fonts and colours, exact layout mode. Right-to-left paragraphs get w:bidi, Arabic runs w:rtl with complex-script size/bold/italic, Arabic tables bidiVisual in logical column order."
 
 [[feature]]
 id = "create.export-rtf"
@@ -6874,8 +6874,8 @@ milestone = "M10"
 status = "shipped"
 commands = ["export.rtf"]
 tools = ["doc_export_office"]
-evidence = ["crates/export/src/lib.rs::rtf_escapes_and_sizes", "crates/export/src/lib.rs::word_opens_text_with_control_characters_and_long_pages", "crates/automation/tests/automation.rs::exporting_to_word_html_and_rtf", "crates/ui-egui/tests/compare.rs::export_to_word_html_and_rtf"]
-notes = "Paragraphs with sizes, bold, italic, Unicode; page breaks. Images are left out."
+evidence = ["crates/export/src/lib.rs::rtf_escapes_and_sizes", "crates/export/src/lib.rs::word_opens_text_with_control_characters_and_long_pages", "crates/automation/tests/automation.rs::exporting_to_word_html_and_rtf", "crates/ui-egui/tests/compare.rs::export_to_word_html_and_rtf", "crates/export/tests/rtl.rs::arabic_exports_right_to_left_in_every_format"]
+notes = "Paragraphs with sizes, bold, italic, Unicode; page breaks. Images are left out. Right-to-left paragraphs get \\rtlpar\\qr and \\rtlch runs with associated size/bold/italic; Arabic tables are \\rtlrow rows in logical order."
 
 [[feature]]
 id = "create.export-xlsx"
@@ -6958,8 +6958,8 @@ milestone = "M10"
 status = "partial"
 commands = ["export.html"]
 tools = ["doc_export_office"]
-evidence = ["crates/export/src/lib.rs::html_has_headings_paragraphs_and_images_in_order", "crates/export/src/lib.rs::grid_text_becomes_a_real_table_in_every_format", "crates/automation/tests/automation.rs::exporting_to_word_html_and_rtf", "crates/ui-egui/tests/compare.rs::export_to_word_html_and_rtf"]
-notes = "Single HTML file with headings, paragraphs, inline images, and detected tables with spans/empty cells. Not yet: multi-page folder output, CSS from fonts."
+evidence = ["crates/export/src/lib.rs::html_has_headings_paragraphs_and_images_in_order", "crates/export/src/lib.rs::grid_text_becomes_a_real_table_in_every_format", "crates/automation/tests/automation.rs::exporting_to_word_html_and_rtf", "crates/ui-egui/tests/compare.rs::export_to_word_html_and_rtf", "crates/export/tests/rtl.rs::arabic_exports_right_to_left_in_every_format"]
+notes = "Single HTML file with headings, paragraphs, inline images, and detected tables with spans/empty cells. Not yet: multi-page folder output, CSS from fonts. Right-to-left paragraphs and tables get dir=rtl (tables in logical column order)."
 
 [[feature]]
 id = "create.export-text"

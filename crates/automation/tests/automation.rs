@@ -2952,3 +2952,26 @@ fn arabic_text_round_trips_through_save_extract_and_search() {
         ok(&mut a, "doc_close", json!({ "doc": back }));
     }
 }
+
+#[test]
+fn arabic_text_exports_right_to_left_to_word_html_and_rtf() {
+    if pdfcraft_fonts::shaping::ShapingFace::arabic().is_none() {
+        eprintln!("skipping: built without the craft-fonts Arabic face (set CRAFT_FONTS_DIR)");
+        return;
+    }
+    let dir = workdir("arabic-export");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    ok(&mut a, "page_add_text", json!({ "doc": doc, "page": 1, "text": "مرحبا بالعالم رقم 7", "at": [20, 60], "width": 180, "size": 12 }));
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "ar.pdf" }));
+    let back = ok(&mut a, "doc_open", json!({ "path": "ar.pdf" }))["doc"].as_u64().unwrap();
+    for name in ["ar.html", "ar.docx", "ar.rtf"] {
+        ok(&mut a, "doc_export_office", json!({ "doc": back, "path": name }));
+    }
+    let html = std::fs::read_to_string(dir.join("ar.html")).unwrap();
+    assert!(html.contains(">مرحبا بالعالم رقم 7</") && html.contains("dir=\"rtl\""), "{html}");
+    let docx = std::fs::read(dir.join("ar.docx")).unwrap();
+    assert!(!docx.is_empty());
+    let rtf = std::fs::read_to_string(dir.join("ar.rtf")).unwrap();
+    assert!(rtf.contains("\\rtlpar\\qr") && rtf.contains("\\rtlch"), "{rtf}");
+}

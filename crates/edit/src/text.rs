@@ -125,6 +125,8 @@ pub struct TextBlock {
     /// The text fill colour as RGB, used by the visual editor and preserved when no colour
     /// override is requested.
     pub color: [f64; 3],
+    /// Whether the paragraph reads right to left (its first line's direction, per UAX #9).
+    pub rtl: bool,
     /// Indexes into [`text_lines`].
     pub lines: Vec<usize>,
 }
@@ -1093,6 +1095,7 @@ fn group_blocks(lines: &[TextLine]) -> Vec<TextBlock> {
                 bold: l.bold,
                 italic: l.italic,
                 color: l.color,
+                rtl: l.rtl,
                 lines: vec![i],
             });
         }

@@ -171,6 +171,7 @@ impl crate::Document {
                             size: b.size,
                             bold: f.contains("bold") || f.contains("black") || f.contains("heavy"),
                             italic: f.contains("italic") || f.contains("oblique"),
+                            rtl: b.rtl,
                         }
                     })
                     .collect();
