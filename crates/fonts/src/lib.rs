@@ -68,6 +68,12 @@ pub fn wrap(text: &str, size: f64, width: f64) -> Vec<String> {
     lines
 }
 
+/// Whether `s` has a character WinAnsiEncoding can't show (it would become `?`), so it needs an
+/// embedded Unicode font. Line breaks and tabs don't count.
+pub fn needs_unicode_font(s: &str) -> bool {
+    s.chars().any(|c| !matches!(c, '\n' | '\r' | '\t' | '?') && win_ansi(c.encode_utf8(&mut [0; 4])) == b"?")
+}
+
 /// Encode text in WinAnsiEncoding (ISO 32000-2 Annex D); unmappable characters become `?`.
 pub fn win_ansi(s: &str) -> Vec<u8> {
     s.chars()

@@ -2,7 +2,7 @@
 //! move/resize/retype/restyle it, delete it. Geometry is in points from the top-left of the
 //! displayed page (y down), like every other tool.
 
-use pdfcraft_engine::{AddedContent, AddedText, Edit, FontFamily, TextAlign};
+use pdfcraft_engine::{AddedContent, AddedText, Edit, FontFamily, TextAlign, TextDirection};
 use serde_json::{Value, json};
 
 use crate::comments::parse_color;
@@ -59,6 +59,14 @@ fn style(a: &Args, t: &mut AddedText) -> Result<()> {
             "right" => TextAlign::Right,
             "justify" => TextAlign::Justify,
             other => return Err(bad(format!("unknown align {other:?}"))),
+        };
+    }
+    if let Some(d) = a.opt_str("direction")? {
+        t.direction = match d {
+            "auto" => TextDirection::Auto,
+            "ltr" => TextDirection::Ltr,
+            "rtl" => TextDirection::Rtl,
+            other => return Err(bad(format!("unknown direction {other:?} (auto, ltr, rtl)"))),
         };
     }
     Ok(())

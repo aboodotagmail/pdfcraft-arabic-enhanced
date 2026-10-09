@@ -37,6 +37,8 @@ pub use pdfcraft_create::{CONVERTIBLE, ImageResolution, SourceKind, source_kind}
 pub use pdfcraft_edit::{
     Added, AddedImage, AddedText, Align as TextAlign, Background, Content as AddedContent, Family as FontFamily, HeaderFooter, MarkKind, Watermark,
 };
+/// Paragraph direction of added text drawn with the embedded Unicode font.
+pub use pdfcraft_fonts::layout::BaseDirection as TextDirection;
 pub use pdfcraft_forms::{
     BorderStyle, CheckStyle, Field as FormField, FieldAction, FieldChange, FieldFont, FieldKind as FormFieldKind, FieldProps, FieldValue,
     Look as FieldLook, NewField, TabOrder, Trigger as FieldTrigger, Widget as FormWidget, af as form_scripts, flags as field_flags,

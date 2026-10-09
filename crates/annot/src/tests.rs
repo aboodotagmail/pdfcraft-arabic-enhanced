@@ -735,3 +735,43 @@ fn comments_without_appearances_get_one_for_display_only() {
     ]);
     assert!(with_missing_appearances(&complete).is_none());
 }
+
+#[test]
+fn arabic_comments_are_drawn_with_an_embedded_font() {
+    let mut doc = fixture();
+    let shape = Shape::Typewriter { rect: [100.0, 700.0, 300.0, 716.0], font_size: 12.0 };
+    let style = Style::default_for(&shape);
+    let new = NewAnnotation { page: 1, shape, style, contents: "مرحبا بالعالم".into(), author: "Ada".into() };
+    if pdfcraft_fonts::shaping::ShapingFace::arabic().is_none() {
+        eprintln!("skipping: built without the craft-fonts Arabic face (set CRAFT_FONTS_DIR)");
+        let before = list(&doc, 1).len();
+        let err = add_annotation(&mut doc, &new, &meta("x")).unwrap_err().to_string();
+        assert!(err.contains("Arabic font"), "{err}");
+        assert_eq!(list(&doc, 1).len(), before, "nothing half-added");
+        assert!(!doc.is_modified());
+        return;
+    }
+    let i = add_annotation(&mut doc, &new, &meta("x")).unwrap();
+    let doc = reopen(&doc);
+    let all = list(&doc, 1);
+    assert_eq!(text(&all[i], b"Contents"), "مرحبا بالعالم");
+    let ap = ap_content(&doc, &all[i]);
+    assert!(ap.contains("/PCAr 12 Tf") && ap.contains("> Tj") && !ap.contains("(?"), "{ap}");
+    // The appearance's font is a Type0 font with an embedded subset.
+    let n = all[i].get(b"AP").and_then(|a| a.as_dict()).and_then(|a| a.reference(b"N")).unwrap();
+    let ap_obj = doc.get(n);
+    let Object::Stream(st) = &*ap_obj else { panic!() };
+    let res = st.dict.get(b"Resources").and_then(Object::as_dict).unwrap();
+    let font = res.get(b"Font").and_then(Object::as_dict).and_then(|f| f.reference(b"PCAr")).unwrap();
+    assert_eq!(doc.get(font).as_dict().unwrap().name(b"Subtype"), Some(&b"Type0"[..]));
+    // Retyping Latin goes back to Helvetica; retyping Arabic draws it again.
+    let mut doc = doc;
+    set_contents(&mut doc, 1, i, "Hello", &meta("")).unwrap();
+    assert!(ap_content(&doc, &list(&doc, 1)[i]).contains("(Hello) Tj"));
+    set_contents(&mut doc, 1, i, "سلام عليكم", &meta("")).unwrap();
+    assert!(ap_content(&doc, &list(&doc, 1)[i]).contains("/PCAr"));
+    // Text no font can show is refused and changes nothing.
+    let before = write_incremental(&doc, &SaveOptions::default()).unwrap();
+    assert!(set_contents(&mut doc, 1, i, "سلام 日本", &meta("")).is_err());
+    assert_eq!(write_incremental(&doc, &SaveOptions::default()).unwrap(), before);
+}

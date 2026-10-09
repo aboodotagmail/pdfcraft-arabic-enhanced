@@ -962,3 +962,89 @@ fn the_graphics_state_carries_over_between_content_streams() {
     let l = &text::text_lines(&doc, 0).unwrap()[0];
     assert!(close(l.rect[0], 100.0) && close(l.size, 10.0), "{l:?}");
 }
+
+/// The page's `/Font` resource names.
+fn page_fonts(doc: &Document, page: usize) -> Vec<String> {
+    let p = page_list(doc).swap_remove(page);
+    let res = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
+    let fonts = res.get(b"Font").map(|f| doc.resolve(f)).and_then(|f| f.as_dict().cloned()).unwrap_or_default();
+    fonts.iter().map(|(k, _)| String::from_utf8_lossy(k).into_owned()).collect()
+}
+
+#[test]
+fn arabic_added_text_is_embedded_shaped_text_that_stays_editable() {
+    if pdfcraft_fonts::shaping::ShapingFace::arabic().is_none() {
+        eprintln!("skipping: built without the craft-fonts Arabic face (set CRAFT_FONTS_DIR)");
+        let mut doc = fixture();
+        let t = AddedText { rect: [72.0, 600.0, 300.0, 700.0], text: "سلام".into(), ..AddedText::default() };
+        let err = add_content(&mut doc, 0, &Content::Text(t)).unwrap_err().to_string();
+        assert!(err.contains("Noto Sans Arabic"), "{err}");
+        assert!(!doc.is_modified(), "nothing written");
+        return;
+    }
+    let mut doc = fixture();
+    let text =
+        AddedText {
+            rect: [72.0, 600.0, 400.0, 700.0], text: "بِسْمِ اللهِ الرَّحْمٰنِ الرَّحِيمِ\nرقم 123 ABC".into(), size: 16.0, ..AddedText::default()
+        };
+    assert!(added::uses_unicode_font(&text));
+    add_content(&mut doc, 0, &Content::Text(text.clone())).unwrap();
+    let doc2 = reopen(&doc);
+    let all = list_added(&doc2);
+    let Content::Text(t) = &all[0].content else { panic!() };
+    assert_eq!(t.text, text.text, "the item keeps its text as typed");
+    assert_eq!(added::lines(t), ["بِسْمِ اللهِ الرَّحْمٰنِ الرَّحِيمِ", "رقم 123 ABC"]);
+    let fonts = page_fonts(&doc2, 0);
+    let ar: Vec<&String> = fonts.iter().filter(|f| f.starts_with("PCAr")).collect();
+    assert_eq!(ar.len(), 1, "{fonts:?}");
+    assert!(fonts.contains(&"F1".to_string()), "the page's own fonts stay");
+    let page0 = streams(&doc2, 0).join("\n");
+    assert!(page0.contains(&format!("/{} 16 Tf", ar[0])) && page0.contains("> Tj"), "{page0}");
+    assert!(!page0.contains("(?"), "no WinAnsi fallback");
+
+    // Retype: the old font goes, a new one comes.
+    let mut doc = doc2;
+    let old = ar[0].clone();
+    update_content(&mut doc, 0, 0, &Content::Text(AddedText { text: "مرحبا".into(), ..text.clone() })).unwrap();
+    let fonts = page_fonts(&doc, 0);
+    assert!(!fonts.contains(&old) && fonts.iter().filter(|f| f.starts_with("PCAr")).count() == 1, "{fonts:?}");
+    // Back to Latin: no Arabic font left.
+    update_content(&mut doc, 0, 0, &Content::Text(AddedText { text: "Plain".into(), ..text.clone() })).unwrap();
+    assert!(page_fonts(&doc, 0).iter().all(|f| !f.starts_with("PCAr")));
+    update_content(&mut doc, 0, 0, &Content::Text(text.clone())).unwrap();
+    delete_content(&mut doc, 0, 0).unwrap();
+    assert!(page_fonts(&doc, 0).iter().all(|f| !f.starts_with("PCAr")), "deleting the item drops its font");
+    reopen(&doc);
+}
+
+#[test]
+fn text_that_cannot_be_shown_is_refused_and_the_document_is_unchanged() {
+    if pdfcraft_fonts::shaping::ShapingFace::arabic().is_none() {
+        return;
+    }
+    let mut doc = fixture();
+    add_content(&mut doc, 0, &Content::Text(AddedText { rect: [72.0, 600.0, 400.0, 700.0], text: "سلام".into(), ..AddedText::default() })).unwrap();
+    let before = write_incremental(&doc, &SaveOptions::default()).unwrap();
+    // Japanese isn't in the Arabic face: an error naming the character, nothing written.
+    let bad = AddedText { rect: [72.0, 600.0, 400.0, 700.0], text: "سلام 日本".into(), ..AddedText::default() };
+    let err = add_content(&mut doc, 0, &Content::Text(bad.clone())).unwrap_err().to_string();
+    assert!(err.contains('日'), "{err}");
+    let err = update_content(&mut doc, 0, 0, &Content::Text(bad)).unwrap_err().to_string();
+    assert!(err.contains('日'), "{err}");
+    assert_eq!(write_incremental(&doc, &SaveOptions::default()).unwrap(), before, "the document is exactly as it was");
+    let Content::Text(t) = &list_added(&doc)[0].content else { panic!() };
+    assert_eq!(t.text, "سلام");
+}
+
+#[test]
+fn hostile_arabic_input_never_panics() {
+    if pdfcraft_fonts::shaping::ShapingFace::arabic().is_none() {
+        return;
+    }
+    for text in ["\u{202E}abc\u{202C}سلام", "\u{064E}\u{064E}", "ـــــ", &"لا".repeat(5000), "سلام\u{2029}\u{2029}", "x\u{200F}"] {
+        for rect in [[0.0, 0.0, 2.0, 2.0], [72.0, 600.0, 400.0, 700.0], [-1e9, -1e9, 1e9, 1e9]] {
+            let mut doc = fixture();
+            let _ = add_content(&mut doc, 0, &Content::Text(AddedText { rect, text: text.into(), ..AddedText::default() }));
+        }
+    }
+}

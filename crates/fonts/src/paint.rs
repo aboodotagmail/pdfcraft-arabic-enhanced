@@ -8,8 +8,76 @@
 //! left to right over the span and then reads right-to-left text from the right, which reverses
 //! the word (checked with pdftotext 24.02 against a Chromium-made reference file).
 
+use pdfcraft_cos::{Document, ObjRef};
+
 use crate::embed::{EmbedError, FontSubset, actual_text_bdc, hex_codes};
-use crate::layout::{LaidLine, LaidRun};
+use crate::layout::{BaseDirection, LaidLine, LaidRun, LineAlign, layout};
+use crate::shaping::{ShapeError, ShapingFace};
+
+/// Why a block of text could not be written. Nothing has been added to the document.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextError {
+    Shape(ShapeError),
+    Embed(EmbedError),
+}
+
+impl std::fmt::Display for TextError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TextError::Shape(e) => e.fmt(f),
+            TextError::Embed(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for TextError {}
+
+impl From<ShapeError> for TextError {
+    fn from(e: ShapeError) -> Self {
+        TextError::Shape(e)
+    }
+}
+
+impl From<EmbedError> for TextError {
+    fn from(e: EmbedError) -> Self {
+        TextError::Embed(e)
+    }
+}
+
+/// Lay `text` out at `size` points in a box `width` points wide.
+pub fn layout_points(
+    face: &ShapingFace,
+    text: &str,
+    size: f64,
+    width: f64,
+    direction: BaseDirection,
+    align: LineAlign,
+) -> Result<Vec<LaidLine>, ShapeError> {
+    let upem = f64::from(face.units_per_em().max(1));
+    let size = if size.is_finite() && size > 0.0 { size } else { 12.0 };
+    let units = if width.is_finite() { (width * upem / size).clamp(1.0, 1e9) } else { 1e9 };
+    // In range: clamped above.
+    layout(face, text, units as i64, direction, align)
+}
+
+/// A block of text written with an embedded subset font: the content operators and the Type0
+/// font to put in the resources under `opts.font`.
+#[derive(Clone, Debug)]
+pub struct Block {
+    pub ops: String,
+    pub font: ObjRef,
+}
+
+/// Paint `lines` and write their font into `doc`. Everything that can fail is done before the
+/// first object is added, so on error `doc` is unchanged.
+pub fn write_block(doc: &mut Document, face: &ShapingFace, lines: &[LaidLine], opts: &PaintOptions<'_>) -> Result<Block, TextError> {
+    let mut subset = FontSubset::new(face);
+    let ops = paint_lines(&mut subset, lines, opts)?;
+    // Built (and checked) before anything is added; `write` adds nothing if this fails.
+    subset.font_program()?;
+    let font = subset.write(doc)?;
+    Ok(Block { ops, font })
+}
 
 /// Where and how the lines are drawn. Text space is the content stream's user space.
 #[derive(Clone, Debug)]

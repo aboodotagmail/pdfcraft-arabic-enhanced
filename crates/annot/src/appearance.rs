@@ -10,7 +10,7 @@
 //! Helvetica font with WinAnsi encoding; line breaking uses [`text_width`], an approximation of
 //! Helvetica's proportions by character class (no font program or metrics file is bundled).
 
-use pdfcraft_cos::{Dict, Object, PdfString, Stream};
+use pdfcraft_cos::{Dict, Document, Object, PdfString, Stream};
 pub use pdfcraft_fonts::{helvetica_width as text_width, wrap};
 use pdfcraft_fonts::{literal, win_ansi};
 
@@ -632,6 +632,87 @@ pub fn build(d: &Dict) -> Option<Stream> {
         }
     }
     Some(form(rect, &out, res))
+}
+
+/// The text box of a FreeText comment: its rectangle (inside `/RD` for callouts), padding, and
+/// the `/DA` size and colour. Mirrors the FreeText branch of [`build`].
+struct FreeTextBox {
+    rect: [f64; 4],
+    pad: f64,
+    size: f64,
+    color: Rgb,
+    q: i64,
+}
+
+fn freetext_box(d: &Dict) -> Option<FreeTextBox> {
+    let rect = nums(d, b"Rect").filter(|r| r.len() == 4)?;
+    let mut rect = [rect[0].min(rect[2]), rect[1].min(rect[3]), rect[0].max(rect[2]), rect[1].max(rect[3])];
+    let (color, size) = parse_da(d);
+    let bw = if d.contains(b"BS") || d.contains(b"Border") { border_width(d) } else { 0.0 };
+    if d.contains(b"CL") {
+        let rd = nums(d, b"RD").filter(|r| r.len() == 4 && r.iter().all(|x| *x >= 0.0))?;
+        rect = [rect[0] + rd[0], rect[1] + rd[1], rect[2] - rd[2], rect[3] - rd[3]];
+    }
+    Some(FreeTextBox { rect, pad: 2.0 + bw, size, color, q: d.int(b"Q").unwrap_or(0) })
+}
+
+/// Whether a FreeText comment's text needs the embedded Unicode font (Arabic and other text
+/// WinAnsi can't show).
+pub fn needs_unicode(d: &Dict) -> bool {
+    d.name(b"Subtype") == Some(b"FreeText")
+        && d.get(b"Contents").and_then(|o| o.as_string()).is_some_and(|s| pdfcraft_fonts::needs_unicode_font(&s.to_text()))
+}
+
+/// The normal appearance of a FreeText comment whose text needs the embedded Unicode font: the
+/// frame [`build`] draws, and the text shaped, laid out (right to left where it is) and written
+/// with an embedded subset of the Arabic face, so it stays searchable. The font's objects are
+/// added to `doc` only once the text is known to be drawable.
+pub fn build_unicode(doc: &mut Document, d: &Dict) -> Result<Option<Stream>, String> {
+    use pdfcraft_fonts::layout::{BaseDirection, LineAlign};
+    use pdfcraft_fonts::paint::{PaintOptions, layout_points, write_block};
+    let text = d.get(b"Contents").and_then(|o| o.as_string()).map(PdfString::to_text).unwrap_or_default();
+    let mut frame_dict = d.clone();
+    frame_dict.remove(b"Contents");
+    let Some(frame) = build(&frame_dict) else { return Ok(None) };
+    let Some(b) = freetext_box(d) else { return Ok(None) };
+    let face = pdfcraft_fonts::shaping::ShapingFace::arabic()
+        .ok_or_else(|| "this build has no Arabic font (Noto Sans Arabic from craft-fonts); the comment's text can't be drawn".to_string())?;
+    let width = (b.rect[2] - b.rect[0] - 2.0 * b.pad).max(1.0);
+    let align = match b.q {
+        1 => LineAlign::Center,
+        2 => LineAlign::Right,
+        _ => LineAlign::Start,
+    };
+    let lines =
+        layout_points(face, &text, b.size, width, BaseDirection::Auto, align).map_err(|e| format!("the comment's text can't be drawn: {e}"))?;
+    let opts = PaintOptions {
+        font: "PCAr",
+        size: b.size,
+        left: b.rect[0] + b.pad,
+        baseline: b.rect[3] - b.pad - b.size * 0.9,
+        leading: b.size * 1.2,
+        fake_bold: false,
+        slant: 0.0,
+        actual_text: false,
+    };
+    let base = frame.decoded().map_err(|e| e.to_string())?;
+    let block = write_block(doc, face, &lines, &opts).map_err(|e| format!("the comment's text can't be drawn: {e}"))?;
+    let mut content = base;
+    content.extend(
+        format!("q\n{} {} {} {} re W n\n{}", n(b.rect[0]), n(b.rect[1]), n(b.rect[2] - b.rect[0]), n(b.rect[3] - b.rect[1]), rg(b.color)).bytes(),
+    );
+    content.extend(block.ops.bytes());
+    content.extend_from_slice(b"Q\n");
+    let mut sd = frame.dict.clone();
+    sd.remove(b"Filter");
+    sd.remove(b"DecodeParms");
+    sd.remove(b"Length");
+    let mut res = sd.get(b"Resources").and_then(Object::as_dict).cloned().unwrap_or_default();
+    let mut fonts = res.get(b"Font").and_then(Object::as_dict).cloned().unwrap_or_default();
+    fonts.set(b"PCAr".to_vec(), Object::Ref(block.font));
+    res.set(b"Font".to_vec(), Object::Dict(fonts));
+    sd.set(b"Resources".to_vec(), Object::Dict(res));
+    Ok(Some(Stream::flate(sd, &content)))
 }
 
 /// A rubber stamp: a rounded frame (a pointed tag for sign-here stamps) with the label in bold

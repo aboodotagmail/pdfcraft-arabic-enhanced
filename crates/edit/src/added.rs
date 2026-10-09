@@ -8,7 +8,10 @@
 //! `/Rotate`), so items stay upright on rotated pages.
 
 use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString, Stream};
-use pdfcraft_fonts::{helvetica_width, literal, win_ansi};
+use pdfcraft_fonts::layout::{BaseDirection, LineAlign};
+use pdfcraft_fonts::paint::{PaintOptions, layout_points, write_block};
+use pdfcraft_fonts::shaping::ShapingFace;
+use pdfcraft_fonts::{helvetica_width, literal, needs_unicode_font, win_ansi};
 
 use crate::{EditError, check, contents, n, page_list, place_tagged};
 
@@ -95,6 +98,9 @@ pub struct AddedText {
     pub size: f64,
     pub color: [f64; 3],
     pub align: Align,
+    /// Paragraph direction for text drawn with the embedded Unicode font (Arabic and other text
+    /// WinAnsi can't show). `Auto` follows each paragraph's first strong character.
+    pub direction: BaseDirection,
 }
 
 impl Default for AddedText {
@@ -108,6 +114,7 @@ impl Default for AddedText {
             size: 12.0,
             color: [0.0; 3],
             align: Align::Left,
+            direction: BaseDirection::Auto,
         }
     }
 }
@@ -193,8 +200,52 @@ fn norm(r: [f64; 4]) -> [f64; 4] {
     [r[0].min(r[2]), r[1].min(r[3]), r[0].max(r[2]), r[1].max(r[3])]
 }
 
-/// The lines of a text item after wrapping to its box width.
+/// Whether a text item is drawn with the embedded Unicode font (shaped, bidi) rather than a
+/// standard font: it has characters WinAnsi can't show.
+pub fn uses_unicode_font(t: &AddedText) -> bool {
+    needs_unicode_font(&t.text)
+}
+
+/// `Left` is the paragraph's start edge (right for right-to-left paragraphs).
+fn line_align(a: Align) -> LineAlign {
+    match a {
+        Align::Left => LineAlign::Start,
+        Align::Center => LineAlign::Center,
+        Align::Right => LineAlign::Right,
+        Align::Justify => LineAlign::Justify,
+    }
+}
+
+/// The Unicode face, or why the text can't be shown.
+fn unicode_face(t: &AddedText) -> Result<&'static ShapingFace, EditError> {
+    ShapingFace::arabic().ok_or_else(|| {
+        let c = t.text.chars().find(|c| needs_unicode_font(c.encode_utf8(&mut [0; 4]))).unwrap_or('?');
+        EditError::Invalid(format!(
+            "this build has no font for \"{c}\" (U+{:04X}): Arabic text needs the Noto Sans Arabic face from craft-fonts (build with CRAFT_FONTS_DIR)",
+            u32::from(c)
+        ))
+    })
+}
+
+fn text_error(e: impl std::fmt::Display) -> EditError {
+    EditError::Invalid(format!("the text can't be added: {e}"))
+}
+
+/// The laid-out lines of a Unicode-font item.
+fn unicode_lines(t: &AddedText) -> Result<(&'static ShapingFace, Vec<pdfcraft_fonts::layout::LaidLine>), EditError> {
+    let face = unicode_face(t)?;
+    let width = (t.rect[2] - t.rect[0]).abs().max(t.size);
+    let lines = layout_points(face, &t.text, t.size, width, t.direction, line_align(t.align)).map_err(text_error)?;
+    Ok((face, lines))
+}
+
+/// The lines of a text item after wrapping to its box width (logical order).
 pub fn lines(t: &AddedText) -> Vec<String> {
+    if uses_unicode_font(t)
+        && let Ok((_, laid)) = unicode_lines(t)
+    {
+        return laid.into_iter().map(|l| l.text).collect();
+    }
     let width = (t.rect[2] - t.rect[0]).max(t.size);
     let mut out = Vec::new();
     for para in t.text.split('\n') {
@@ -224,11 +275,49 @@ fn font_name(base: &str) -> String {
     format!("PCF{}", base.replace('-', ""))
 }
 
-/// Content and resources for an item; `view` maps display space to user space.
-fn draw(doc: &Document, c: &Content, view: [f64; 6]) -> Result<(Vec<u8>, Dict), EditError> {
+/// A font resource name no font on the page has (`taken`), so items never replace each other's
+/// fonts (object numbers alone don't do: a full save renumbers objects but keeps names).
+fn free_font_name(taken: &Dict, num: u32) -> String {
+    let mut name = format!("PCAr{num}");
+    let mut suffix = 0u32;
+    while taken.contains(name.as_bytes()) {
+        suffix = suffix.saturating_add(1);
+        name = format!("PCAr{num}_{suffix}");
+    }
+    name
+}
+
+/// Content and resources for an item; `view` maps display space to user space. `taken` holds
+/// the page's font names. Returns the names of fonts the item owns (embedded Unicode fonts).
+fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict) -> Result<(Vec<u8>, Dict, Vec<String>), EditError> {
     let mut res = Dict::new();
+    let mut owned = Vec::new();
     let mut out = format!("q {} {} {} {} {} {} cm\n", n(view[0]), n(view[1]), n(view[2]), n(view[3]), n(view[4]), n(view[5])).into_bytes();
     match c {
+        Content::Text(t) if uses_unicode_font(t) => {
+            let (face, lines) = unicode_lines(t)?;
+            let r = text_rect(t);
+            // A provisional name; the font's object number is known only once it is written.
+            let provisional = free_font_name(taken, doc.object_numbers().last().copied().unwrap_or(0).saturating_add(1));
+            let opts = PaintOptions {
+                font: &provisional,
+                size: t.size,
+                left: r[0],
+                baseline: r[3] - 0.95 * t.size,
+                leading: 1.2 * t.size,
+                fake_bold: t.bold,
+                slant: if t.italic { 0.2 } else { 0.0 },
+                actual_text: false,
+            };
+            let block = write_block(doc, face, &lines, &opts).map_err(text_error)?;
+            let [cr, cg, cb] = t.color.map(|v| v.clamp(0.0, 1.0));
+            out.extend(format!("{} {} {} rg {} {} {} RG\n", n(cr), n(cg), n(cb), n(cr), n(cg), n(cb)).bytes());
+            out.extend(block.ops.bytes());
+            let mut fonts = Dict::new();
+            fonts.set(provisional.clone().into_bytes(), Object::Ref(block.font));
+            res.set(b"Font".to_vec(), Object::Dict(fonts));
+            owned.push(provisional);
+        }
         Content::Text(t) => {
             let base = t.family.base_font(t.bold, t.italic);
             let name = font_name(base);
@@ -295,10 +384,10 @@ fn draw(doc: &Document, c: &Content, view: [f64; 6]) -> Result<(Vec<u8>, Dict), 
         }
     }
     out.extend_from_slice(b"Q\n");
-    Ok((out, res))
+    Ok((out, res, owned))
 }
 
-fn params(c: &Content) -> Dict {
+fn params(c: &Content, fonts: &[String]) -> Dict {
     let mut d = Dict::new();
     let arr = |v: &[f64]| Object::Array(v.iter().map(|x| Object::Real(*x)).collect());
     match c {
@@ -318,6 +407,14 @@ fn params(c: &Content) -> Dict {
                 }),
             );
             d.set(b"Rect".to_vec(), arr(&text_rect(t)));
+            match t.direction {
+                BaseDirection::Auto => {}
+                BaseDirection::Ltr => d.set(b"Dir".to_vec(), Object::name("LTR")),
+                BaseDirection::Rtl => d.set(b"Dir".to_vec(), Object::name("RTL")),
+            }
+            if !fonts.is_empty() {
+                d.set(b"PCFonts".to_vec(), Object::Array(fonts.iter().map(|f| Object::name(f)).collect()));
+            }
         }
         Content::Image(i) => {
             d.set(b"Kind".to_vec(), Object::name("Image"));
@@ -360,6 +457,11 @@ fn parse(doc: &Document, d: &Dict) -> Option<Content> {
                     Some(2) => Align::Right,
                     Some(3) => Align::Justify,
                     _ => Align::Left,
+                },
+                direction: match d.name(b"Dir") {
+                    Some(b"RTL") => BaseDirection::Rtl,
+                    Some(b"LTR") => BaseDirection::Ltr,
+                    _ => BaseDirection::Auto,
                 },
             }))
         }
@@ -404,15 +506,53 @@ fn validate(c: &Content) -> Result<(), EditError> {
     Ok(())
 }
 
+/// The embedded fonts an item owns (their names in the page's `/Font` resources).
+fn own_fonts(doc: &Document, item: ObjRef) -> Vec<Vec<u8>> {
+    let obj = doc.get(item);
+    let Some(d) = obj.as_dict() else { return Vec::new() };
+    let Some(p) = d.get(b"PCAdded").map(|p| doc.resolve(p)) else { return Vec::new() };
+    let Some(list) = p.as_dict().and_then(|p| p.get(b"PCFonts")).and_then(Object::as_array).cloned() else { return Vec::new() };
+    list.iter().filter_map(|o| o.as_name().map(<[u8]>::to_vec)).filter(|n| n.starts_with(b"PCAr")).collect()
+}
+
+/// Remove `names` from a page resources dictionary's `/Font`.
+fn drop_fonts(doc: &Document, res: &mut Dict, names: &[Vec<u8>]) {
+    if names.is_empty() {
+        return;
+    }
+    let Some(mut fonts) = res.get(b"Font").map(|f| doc.resolve(f)).and_then(|f| f.as_dict().cloned()) else { return };
+    for name in names {
+        fonts.remove(name);
+    }
+    res.set(b"Font".to_vec(), Object::Dict(fonts));
+}
+
 /// Write an item's stream (new, or replacing `obj`) and make its resources available to the page.
+/// All or nothing: on error the document is exactly as it was.
 fn write(doc: &mut Document, page: usize, c: &Content, obj: Option<ObjRef>) -> Result<ObjRef, EditError> {
     validate(c)?;
+    let before = doc.clone();
+    let result = write_inner(doc, page, c, obj);
+    if result.is_err() {
+        *doc = before;
+    }
+    result
+}
+
+fn write_inner(doc: &mut Document, page: usize, c: &Content, obj: Option<ObjRef>) -> Result<ObjRef, EditError> {
     let all = page_list(doc);
     check(&[page], all.len())?;
     let p = &all[page];
-    let (content, res) = draw(doc, c, p.view_matrix(doc))?;
-    // The page gets its own copy of its resources with the item's fonts and images added.
+    // The page gets its own copy of its resources with the item's fonts and images added, and
+    // without the embedded fonts of the version it replaces.
     let mut pres = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
+    if let Some(r) = obj {
+        drop_fonts(doc, &mut pres, &own_fonts(doc, r));
+    }
+    let taken = pres.get(b"Font").map(|f| doc.resolve(f)).and_then(|f| f.as_dict().cloned()).unwrap_or_default();
+    let view = p.view_matrix(doc);
+    let page_obj = p.obj;
+    let (content, res, fonts) = draw(doc, c, view, &taken)?;
     for (k, v) in res.iter() {
         let mut sub = pres.get(k).map(|s| doc.resolve(s)).and_then(|s| s.as_dict().cloned()).unwrap_or_default();
         for (n2, o) in v.as_dict().into_iter().flat_map(|d| d.iter()) {
@@ -420,10 +560,10 @@ fn write(doc: &mut Document, page: usize, c: &Content, obj: Option<ObjRef>) -> R
         }
         pres.set(k.clone(), Object::Dict(sub));
     }
-    doc.update_dict(p.obj, |d| d.set(b"Resources".to_vec(), Object::Dict(pres)))?;
+    doc.update_dict(page_obj, |d| d.set(b"Resources".to_vec(), Object::Dict(pres)))?;
     let mut sd = Dict::new();
     sd.set(b"PCMark".to_vec(), Object::name(TAG));
-    sd.set(b"PCAdded".to_vec(), Object::Dict(params(c)));
+    sd.set(b"PCAdded".to_vec(), Object::Dict(params(c, &fonts)));
     let stream = Stream::flate(sd, &content);
     match obj {
         Some(r) => {
@@ -497,6 +637,22 @@ pub fn delete_content(doc: &mut Document, page: usize, index: usize) -> Result<(
     let a = find(doc, page, index)?;
     let p = page_list(doc).swap_remove(page);
     let list: Vec<Object> = contents(doc, &p)?.into_iter().filter(|o| o.as_ref() != Some(a.obj)).collect();
-    doc.update_dict(p.obj, |d| d.set(b"Contents".to_vec(), Object::Array(list)))?;
+    let fonts = own_fonts(doc, a.obj);
+    // The item's embedded fonts leave the page's own resources with it (`write` gave the page
+    // its own copy, so they are inline there).
+    let res = match p.dict.get(b"Resources") {
+        Some(Object::Dict(d)) if !fonts.is_empty() => {
+            let mut d = d.clone();
+            drop_fonts(doc, &mut d, &fonts);
+            Some(d)
+        }
+        _ => None,
+    };
+    doc.update_dict(p.obj, |d| {
+        d.set(b"Contents".to_vec(), Object::Array(list));
+        if let Some(res) = res {
+            d.set(b"Resources".to_vec(), Object::Dict(res));
+        }
+    })?;
     Ok(())
 }

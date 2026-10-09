@@ -877,6 +877,10 @@ pub fn callout_attach(rect: [f64; 4], knee: [f64; 2]) -> [f64; 2] {
 
 /// Add a comment; returns its index in the page's `/Annots`.
 pub fn add_annotation(doc: &mut Document, new: &NewAnnotation, meta: &Meta) -> Result<usize, AnnotError> {
+    atomic(doc, |doc| add_annotation_inner(doc, new, meta))
+}
+
+fn add_annotation_inner(doc: &mut Document, new: &NewAnnotation, meta: &Meta) -> Result<usize, AnnotError> {
     let page = page_ref(doc, new.page)?;
     let style = &new.style;
     if !finite(&style.color) || !style.opacity.is_finite() || !style.width.is_finite() {
@@ -1078,12 +1082,26 @@ pub fn add_annotation(doc: &mut Document, new: &NewAnnotation, meta: &Meta) -> R
     Ok(index)
 }
 
+/// Run an edit all or nothing: on error the document is exactly as it was (an appearance that
+/// can't be drawn, say Arabic text without the Arabic font, never leaves half an edit behind).
+fn atomic<T>(doc: &mut Document, f: impl FnOnce(&mut Document) -> Result<T, AnnotError>) -> Result<T, AnnotError> {
+    let before = doc.clone();
+    let result = f(doc);
+    if result.is_err() {
+        *doc = before;
+    }
+    result
+}
+
 /// (Re)generate `/AP /N` for the annotation `r` from its dictionary.
 /// Regenerate an annotation's normal appearance from its dictionary.
 pub fn set_appearance(doc: &mut Document, r: ObjRef) -> Result<(), AnnotError> {
     let d = annot_dict(doc, r);
     let subtype = String::from_utf8_lossy(d.name(b"Subtype").unwrap_or_default()).into_owned();
-    let Some(stream) = appearance::build(&d) else { return Err(AnnotError::Unsupported(subtype)) };
+    // Text WinAnsi can't show (Arabic) is shaped and written with an embedded font; when that is
+    // impossible the comment keeps its old appearance and the caller gets the reason.
+    let built = if appearance::needs_unicode(&d) { appearance::build_unicode(doc, &d).map_err(AnnotError::Invalid)? } else { appearance::build(&d) };
+    let Some(stream) = built else { return Err(AnnotError::Unsupported(subtype)) };
     let ap = doc.add(Object::Stream(stream));
     let mut apd = Dict::new();
     apd.set(b"N".to_vec(), Object::Ref(ap));
@@ -1205,6 +1223,10 @@ pub fn delete_annotation(doc: &mut Document, page: usize, index: usize) -> Resul
 /// Change a comment's text. Text boxes are redrawn to show it, and their rectangle follows the
 /// new text: the wrap width and top edge stay, the height fits the wrapped lines.
 pub fn set_contents(doc: &mut Document, page: usize, index: usize, text: &str, meta: &Meta) -> Result<(), AnnotError> {
+    atomic(doc, |doc| set_contents_inner(doc, page, index, text, meta))
+}
+
+fn set_contents_inner(doc: &mut Document, page: usize, index: usize, text: &str, meta: &Meta) -> Result<(), AnnotError> {
     let (_, r) = annot_ref(doc, page, index)?;
     let free_text = annot_dict(doc, r).name(b"Subtype") == Some(b"FreeText");
     doc.update_dict(r, |d| {
@@ -1254,7 +1276,13 @@ fn fitted_box(doc: &Document, r: ObjRef, text: &str) -> Option<[f64; 4]> {
         let longest = text.lines().map(|l| appearance::text_width(l, size)).fold(0.0, f64::max);
         (longest + 2.0 * pad + 4.0).clamp(40.0, 300.0)
     };
-    let lines = appearance::wrap(text, size, (w - 2.0 * pad).max(1.0)).len().max(1) as f64;
+    let inner = (w - 2.0 * pad).max(1.0);
+    // Arabic (and other text drawn with the embedded Unicode font) wraps by its shaped widths.
+    let unicode = pdfcraft_fonts::needs_unicode_font(text).then(pdfcraft_fonts::shaping::ShapingFace::arabic).flatten().and_then(|face| {
+        use pdfcraft_fonts::layout::{BaseDirection, LineAlign};
+        pdfcraft_fonts::paint::layout_points(face, text, size, inner, BaseDirection::Auto, LineAlign::Start).ok()
+    });
+    let lines = unicode.map_or_else(|| appearance::wrap(text, size, inner).len(), |l| l.len()).max(1) as f64;
     Some([x0, top - lines * size * 1.2 - 2.0 * pad - 2.0, x0 + w, top])
 }
 
@@ -1408,6 +1436,10 @@ pub fn move_annotation(doc: &mut Document, page: usize, index: usize, dx: f64, d
 /// Resize a rectangle, oval, text box or stamp to `rect`. Stamps keep their appearance,
 /// which PDF viewers scale from its bounding box into the new rectangle.
 pub fn set_rect(doc: &mut Document, page: usize, index: usize, rect: [f64; 4], meta: &Meta) -> Result<(), AnnotError> {
+    atomic(doc, |doc| set_rect_inner(doc, page, index, rect, meta))
+}
+
+fn set_rect_inner(doc: &mut Document, page: usize, index: usize, rect: [f64; 4], meta: &Meta) -> Result<(), AnnotError> {
     let (_, r) = annot_ref(doc, page, index)?;
     unlocked(doc, r)?;
     let d = annot_dict(doc, r);
@@ -1471,6 +1503,18 @@ fn border_width_of(d: &Dict) -> f64 {
 
 /// Change a comment's colour, opacity and/or line width, and redraw it.
 pub fn set_style(
+    doc: &mut Document,
+    page: usize,
+    index: usize,
+    color: Option<Rgb>,
+    opacity: Option<f64>,
+    width: Option<f64>,
+    meta: &Meta,
+) -> Result<(), AnnotError> {
+    atomic(doc, |doc| set_style_inner(doc, page, index, color, opacity, width, meta))
+}
+
+fn set_style_inner(
     doc: &mut Document,
     page: usize,
     index: usize,
@@ -1624,6 +1668,18 @@ pub fn set_info(
     icon: Option<NoteIcon>,
     meta: &Meta,
 ) -> Result<(), AnnotError> {
+    atomic(doc, |doc| set_info_inner(doc, page, index, author, subject, icon, meta))
+}
+
+fn set_info_inner(
+    doc: &mut Document,
+    page: usize,
+    index: usize,
+    author: Option<&str>,
+    subject: Option<&str>,
+    icon: Option<NoteIcon>,
+    meta: &Meta,
+) -> Result<(), AnnotError> {
     let (_, r) = annot_ref(doc, page, index)?;
     unlocked(doc, r)?;
     let is_note = annot_dict(doc, r).name(b"Subtype") == Some(b"Text");
@@ -1746,6 +1802,10 @@ pub fn add_text_replacement(
 /// of `path`, splitting strokes where they are cut. A drawing with nothing left is deleted.
 /// Returns whether anything was erased.
 pub fn erase_ink(doc: &mut Document, page: usize, index: usize, path: &[[f64; 2]], radius: f64, meta: &Meta) -> Result<bool, AnnotError> {
+    atomic(doc, |doc| erase_ink_inner(doc, page, index, path, radius, meta))
+}
+
+fn erase_ink_inner(doc: &mut Document, page: usize, index: usize, path: &[[f64; 2]], radius: f64, meta: &Meta) -> Result<bool, AnnotError> {
     let (_, r) = annot_ref(doc, page, index)?;
     unlocked(doc, r)?;
     let d = annot_dict(doc, r);
